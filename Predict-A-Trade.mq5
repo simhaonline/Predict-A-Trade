@@ -56,8 +56,8 @@ enum ENUM_WINDOW_ID
 //====================================================================
 input group "=== ULTRA-SCALP MODE (SIMPLIFIED ENGINE) ==="
 input bool   InpSimpleScalpMode           = true;      // TRUE = simple M1 scalp engine (recommended); false = full multi-filter engine
-input int    InpScalpMinScore             = 3;         // simple engine: min directional votes (of 5) - low = trades often
-input double InpScalpMinMomentumATR       = 0.12;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
+input int    InpScalpMinScore             = 2;         // simple engine: min directional votes (of 5) - low = trades often
+input double InpScalpMinMomentumATR       = 0.08;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
 
 input group "=== CAPITAL PROTECTION ==="
 input double InpDailyLossPercent          = 4.0;
@@ -67,11 +67,11 @@ input double InpMonthlyLossLimit          = 15.0;
 input double InpRiskPercent               = 0.50;
 input double InpRiskStepDownOnDD          = 0.10;
 input int    InpMaxConsecutiveLosses      = 3;
-input int    InpMaxTradesPerDay           = 16;
+input int    InpMaxTradesPerDay           = 60;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
 input double InpMinLotMaxRiskPct          = 2.0;       // min-lot trade allowed only if its risk <= this % of balance
-input double InpMaxAggregateOpenRiskPct   = 1.50;
-input double InpMaxDirectionalRiskPct     = 1.00;
+input double InpMaxAggregateOpenRiskPct   = 4.00;
+input double InpMaxDirectionalRiskPct     = 2.50;
 input ENUM_BREAKER_ACTION InpBreakerAction= BREAKER_CLOSE_ALL;
 input bool   InpNoMartingale              = true;      // invariant; retained for audit visibility
 input bool   InpNoAveragingDown           = true;      // invariant; never add to losing exposure
@@ -97,14 +97,14 @@ input group "=== EXECUTION / ANTI-OVERTRADING ==="
 input ENUM_EXECUTION_MODE InpExecutionMode= EXEC_AUTO;
 input int    InpStraddleLayers            = 1;
 input double InpLayerStepATR              = 0.35;
-input int    InpMaxConcurrentPositions    = 3;
-input double InpMaxTotalLots              = 1.00;
+input int    InpMaxConcurrentPositions    = 6;
+input double InpMaxTotalLots              = 3.00;
 input bool   InpArmWhileInTrade           = true;
 input bool   InpScaleIn                   = true;
-input int    InpMinSecondsBetweenEntries  = 60;     // was 120
+input int    InpMinSecondsBetweenEntries  = 15;     // was 120
 input int    InpMinBarsFreshStructure     = 2;
-input int    InpMaxSignalsPerWindow       = 5;
-input double InpPerWindowRiskBudgetPct    = 1.50;
+input int    InpMaxSignalsPerWindow       = 20;
+input double InpPerWindowRiskBudgetPct    = 3.00;
 input bool   InpOncePerValidatedEvent     = true;
 input bool   InpCancelStalePendings       = true;
 input int    InpPendingExpiryMinutes      = 5;
