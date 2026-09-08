@@ -1607,7 +1607,7 @@ void UpdateRiskPeriods()
    }
    double d=(g_dayAnchor>0?(g_dayAnchor-eq)/g_dayAnchor*100:0),w=(g_weekAnchor>0?(g_weekAnchor-eq)/g_weekAnchor*100:0),m=(g_monthAnchor>0?(g_monthAnchor-eq)/g_monthAnchor*100:0);
    g_maxDDSeen=MathMax(g_maxDDSeen,MathMax(0,d));if(d>=InpDailyLossPercent||d>=InpMaxFloatingDDPercent)g_stopDay=true;if(w>=InpWeeklyLossLimit)g_stopWeek=true;if(m>=InpMonthlyLossLimit)g_stopMonth=true;
-   if(g_consecutiveLosses>=InpMaxConsecutiveLosses)g_stopDay=true;
+   // consecutive losses: risk decays 30% per loss in CurrentRiskPct - no hard halt (user directive: keep trading)
 }
 
 double MoneyPerPricePerLot()
