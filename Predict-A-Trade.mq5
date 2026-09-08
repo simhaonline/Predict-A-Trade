@@ -2895,8 +2895,14 @@ void DashUpdate(bool force=false)
    DashRow("L_SMC",0,yL,"SMC B/S "+IntegerToString(g_smcScoreBull)+"/"+IntegerToString(g_smcScoreBear)+"  FVG "+(g_fvg?(g_fvgDir>0?"UP":"DN"):"-"),BiasColor(g_smcScoreBull-g_smcScoreBear));
    DashRow("L_ADV",0,yL,"IFVG "+(g_ifvg?(g_ifvgDir>0?"BULL":"BEAR"):"-")+"  PTB "+(g_ptb?(g_ptbDir>0?"BULL":"BEAR"):"-")+"  MTF "+((g_h1e20>g_h1e50&&g_m15e20>g_m15e50)?"BULL":((g_h1e20<g_h1e50&&g_m15e20<g_m15e50)?"BEAR":"FLAT")),C_TXT);
    DashRow("L_HV",0,yL,"HV "+IntegerToString(hs2)+"/"+IntegerToString(InpHVMinScore)+(hvNow?" QUAL":" -")+"  VWAPdev "+DoubleToString(vwapDev,2),(hvNow?C_WARN_TXT:C_TXT2));
-   bool gatePass=(!g_paused&&!halted&&tr&&g_score>=InpMinFilterScore&&MathAbs(g_dirBias)>=InpMinDirBias&&!g_newsBlocked);
-   DashRow("L_GATE",0,yL,"Entry gate: "+(gatePass?"PASS":"BLOCKED"),(gatePass?C_UP_TXT:C_DN_TXT));
+   // Ultra-scalp v3: this row mirrors the LIVE engine state (g_gateReason is updated
+   // by TryArm every tick), not the legacy filter-score formula.
+   bool sigOK=(g_scalpSignal!=0);
+   bool safeState=(!g_paused&&!halted&&!g_newsBlocked&&tr);
+   bool gatePass=(safeState&&sigOK&&StringFind(g_gateReason,"no scalp signal")<0
+                  &&StringFind(g_gateReason,"thin session")<0&&StringFind(g_gateReason,"spacing")<0);
+   string gateTxt=(g_paused?"PAUSED":(halted?"HALTED":(g_gateReason=="initialized"?"waiting":g_gateReason)));
+   DashRow("L_GATE",0,yL,ClipText("Gate: "+gateTxt,g_colW-16,g_font),(gatePass?C_UP_TXT:(safeState?C_WARN_TXT:C_DN_TXT)));
    rL=yL;
 
    DashSection("LM",0,yL,"fmp macro / news");
