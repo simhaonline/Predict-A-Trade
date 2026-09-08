@@ -911,6 +911,7 @@ string FMPBase()
 int HttpGet(string url,int timeoutMs,string &body)
 {
    body="";
+   if(MQLInfoInteger(MQL_TESTER)){g_fmpLastErr="tester: web offline";return -1;}   // Strategy Tester: no WebRequest
    uchar post[]; uchar result[]; string rh="";
    string headers="User-Agent: Predict-A-Trade/1.00\r\nAccept: application/json\r\n";
    ResetLastError();
@@ -1012,6 +1013,21 @@ void FMPNewsScan()
 void RefreshFMPMacro(bool force=false)
 {
    if(!InpUseFMP)return;
+   if(MQLInfoInteger(MQL_TESTER))
+   {
+      // Strategy Tester: WebRequest is unavailable - run ONLY the broker-side
+      // EURUSD momentum fallback so the macro layer stays functional offline.
+      g_usdAvailable=false;g_spxAvailable=false;g_usdBias=0;g_spxBias=0;
+      if(InpAllowBrokerMacroFallback&&InpUseEURUSD)
+      {
+         if(g_eurSymbol=="")g_eurSymbol=ResolveBrokerSymbol(InpEURUSDSymbol,"EURUSD");
+         bool ok=false;
+         g_eurMovePct=SymbolMomentumPct(g_eurSymbol,InpMacroTF,InpMacroMomentumBars,ok);
+         g_eurAvailable=ok;
+         g_eurBias=(ok?(g_eurMovePct>=InpEURUSDMinMovePct?1:(g_eurMovePct<=-InpEURUSDMinMovePct?-1:0)):0);
+      }
+      return;
+   }
    datetime now=ServerNow();
    if(!force && g_fmpLastTry>0 && now-g_fmpLastTry<InpFMPRefreshSec)return;
    g_fmpLastTry=now;
@@ -1429,7 +1445,7 @@ void ResetWindowDay()
 void UpdateRiskPeriods()
 {
    datetime n=ServerNow();int dk=DayKey(n),wk=WeekKey(n),mk=MonthKey(n);double eq=AccountInfoDouble(ACCOUNT_EQUITY);
-   if(g_dayKey!=dk){g_dayKey=dk;g_dayAnchor=eq;g_tradesToday=0;g_consecutiveLosses=0;g_stopDay=false;ResetWindowDay();}
+   if(g_dayKey!=dk){g_dayKey=dk;g_dayAnchor=eq;g_tradesToday=0;g_consecutiveLosses=0;g_recoveryLegs=0;g_stopDay=false;ResetWindowDay();}
    if(g_weekKey!=wk){g_weekKey=wk;g_weekAnchor=eq;g_stopWeek=false;}
    if(g_monthKey!=mk){g_monthKey=mk;g_monthAnchor=eq;g_stopMonth=false;}
    double d=(g_dayAnchor>0?(g_dayAnchor-eq)/g_dayAnchor*100:0),w=(g_weekAnchor>0?(g_weekAnchor-eq)/g_weekAnchor*100:0),m=(g_monthAnchor>0?(g_monthAnchor-eq)/g_monthAnchor*100:0);
@@ -1542,7 +1558,10 @@ double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv)
          if((pd>0&&px<op)||(pd<0&&px>op)){risk=MathMin(risk,bal*InpRiskPercent/100.0);break;}
       }
    }
-   double perLot=PriceMoveMoney(slDist,1.0)+CommissionRT(1.0);if(perLot<=0)return 0;double lots=risk/perLot;
+   // Single cost basis: spread + expected slippage + commission (same as
+   // ExpectedAllInCost / NetProfitValid), so sizing neither under-counts costs
+   // nor double-counts them at risk accounting.
+   double perLot=PriceMoveMoney(slDist,1.0)+ExpectedAllInCost(1.0);if(perLot<=0)return 0;double lots=risk/perLot;
    if(InpMaxTotalLots>0)lots=MathMin(lots,MathMax(0,InpMaxTotalLots-SumOwnLots()));
    double fv=FloorVolume(lots);
    // Risk-% sizing below the broker minimum would floor to zero and block EVERY trade on
@@ -1550,7 +1569,7 @@ double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv)
    // cap (default 2% of balance) - the only viable way to scalp gold on a sub-$1k account.
    if(fv<=0 && InpAllowMinLotFallback && lots>0)
    {
-      double minRisk=PriceMoveMoney(slDist,broker.volumeMin)+CommissionRT(broker.volumeMin);
+      double minRisk=PriceMoveMoney(slDist,broker.volumeMin)+ExpectedAllInCost(broker.volumeMin);
       if(bal>0 && minRisk/bal*100.0<=InpMinLotMaxRiskPct) fv=FloorVolume(broker.volumeMin);
    }
    return fv;
@@ -1893,6 +1912,18 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
    s.opened=ServerNow();s.entrySpreadPct=SpreadPercentile();s.entrySlipPts=slip;s.entryAtrPct=ATRPercentile();s.entryVolRatio=g_volRatio;
    s.realizedGross=0;s.realizedNet=entryComm;s.realizedCosts=MathAbs(entryComm)+PriceMoveMoney(SpreadPoints()*broker.point+MathAbs(slip)*broker.point,lots);
    s.maePrice=0;s.mfePrice=0;
+   if(recovery)
+   {
+      // Single-target trade: broker TP was validated by TryRecovery before placement.
+      // Mirror it into the state (tp1=tp2=tp3=placed TP) so management never runs the
+      // 60/25/15 partial ladder and never rewrites the validated broker target.
+      double placed=PositionGetDouble(POSITION_TP);
+      s.tp1=(placed>0?placed:0);s.tp2=s.tp1;s.tp3=s.tp1;
+      s.volTP1=0;s.volTP2=0;s.volTP3=lots;
+      s.tp1Done=true;s.tp2Done=true;   // ladder stages pre-marked done: nothing partials
+      g_ps[idx]=s;
+      return;                          // broker TP/SL stand as sent - no rewrite
+   }
    // Use the HV regime carried by the pending order so the executed plan matches the armed plan.
    BuildThreeTargets(dir,entry,lots,w,hv,s.tp1,s.tp2,s.tp3);
    if(InpUseThreeTargets&&InpAB_EnableThreeTP)AllocateVolumes(lots,s.volTP1,s.volTP2,s.volTP3);
@@ -1992,20 +2023,29 @@ void TryRecovery()
    double sl=ComputeSL(dir,entry);double slDist=MathAbs(entry-sl);if(slDist<=0)return;
    double bal=AccountInfoDouble(ACCOUNT_BALANCE);
    double risk=bal*InpRecoveryRiskPct/100.0;
-   double perLot=PriceMoveMoney(slDist,1.0)+CommissionRT(1.0);if(perLot<=0)return;
+   double perLot=PriceMoveMoney(slDist,1.0)+ExpectedAllInCost(1.0);if(perLot<=0)return;
    double lots=FloorVolume(risk/perLot);
    if(lots<=0 && InpAllowMinLotFallback)
    {
-      double minRisk=PriceMoveMoney(slDist,broker.volumeMin)+CommissionRT(broker.volumeMin);
-      if(bal>0 && minRisk/bal*100.0<=InpMinLotMaxRiskPct) lots=FloorVolume(broker.volumeMin);
+      double minRisk=PriceMoveMoney(slDist,broker.volumeMin)+ExpectedAllInCost(broker.volumeMin);
+      if(bal>0 && minRisk/bal*100.0<=InpMinLotMaxRiskPct) fv=FloorVolume(broker.volumeMin);
    }
    if(lots<=0)return;
    if(InpMaxTotalLots>0&&SumOwnLots()+lots>InpMaxTotalLots)lots=FloorVolume(InpMaxTotalLots-SumOwnLots());
    if(lots<=0)return;
 
    double t1,t2,t3;BuildThreeTargets(dir,entry,lots,WIN_NONE,false,t1,t2,t3);
+   // The recovery is a single-target trade: the TP placed at the broker must be the TP
+   // that was validated. If the ATR-default target sits below the R:R floor, extend it
+   // to the minimum target that satisfies BOTH the floor and the all-in cost check -
+   // then re-verify ordering and validate EXACTLY what will be placed.
+   double md2=MinTradeDistance();
+   double need=MathAbs(entry-sl)*InpRecoveryMinRR;
+   if(MathAbs(t1-entry)<need) t1=PriceNorm(entry+(dir>0?need:-need));
+   double net=0;int gguard=0;
+   while(!NetProfitValid(dir,entry,t1,lots,InpMinNetProfitTP1Money,net)&&gguard++<10) t1=PriceNorm(t1+dir*0.10*atr);
    if(!RRValid(dir,entry,sl,t1,InpRecoveryMinRR)){g_gateReason="recovery: R:R low";return;}
-   double net=0;if(!NetProfitValid(dir,entry,t1,lots,InpMinNetProfitTP1Money,net)){g_gateReason="recovery: cost";return;}
+   if(!NetProfitValid(dir,entry,t1,lots,InpMinNetProfitTP1Money,net)){g_gateReason="recovery: cost";return;}
    if(!RiskRoom(PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots),dir,WIN_NONE,why)){g_gateReason="recovery: risk cap";return;}
 
    string cmt=InpComment+"|RCV|"+(dir>0?"B":"S")+"|"+IntegerToString((int)g_lastLossTime);
@@ -2030,6 +2070,7 @@ void ManagePosition(ulong ticket)
    double excursion=dir*(px-g_ps[idx].entry);if(excursion>0)g_ps[idx].mfePrice=MathMax(g_ps[idx].mfePrice,excursion);else g_ps[idx].maePrice=MathMax(g_ps[idx].maePrice,-excursion);
    if(InpMaxTradeMinutes>0&&ServerNow()-g_ps[idx].opened>=InpMaxTradeMinutes*60){ClosePositionSafe(ticket);return;}
    if(InpAvoidSwap&&InpForceFlatBeforeSwap&&InSwapDangerWindow()){ClosePositionSafe(ticket);return;}
+   if(g_ps[idx].recovery)return;   // single-target recovery: broker TP/SL manage the exit
    if(!InpUseThreeTargets||!InpAB_EnableThreeTP)return;
    bool hit1=(dir>0?bid>=g_ps[idx].tp1:ask<=g_ps[idx].tp1),hit2=(dir>0?bid>=g_ps[idx].tp2:ask<=g_ps[idx].tp2),hit3=(dir>0?bid>=g_ps[idx].tp3:ask<=g_ps[idx].tp3);
    if(!g_ps[idx].tp1Done&&hit1)
@@ -2224,6 +2265,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
             // Realized base-strategy loss: open ONE gated reversal opportunity.
             // Recovery-leg losses never chain another recovery.
             g_lastLossDir=g_ps[pidx].direction;g_lastLossTime=ServerNow();g_lastLossMoney=finalNet;
+            g_recoveryLegs=0;   // fresh loss event = fresh recovery allowance
             g_gateReason="LOSS - recovery candidate";
          }
          FinalizeWindowTrade(pidx,finalNet,g_ps[pidx].realizedGross,g_ps[pidx].realizedCosts);
