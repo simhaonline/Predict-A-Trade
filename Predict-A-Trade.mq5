@@ -54,6 +54,11 @@ enum ENUM_WINDOW_ID
 //====================================================================
 // INPUTS
 //====================================================================
+input group "=== ULTRA-SCALP MODE (SIMPLIFIED ENGINE) ==="
+input bool   InpSimpleScalpMode           = true;      // TRUE = simple M1 scalp engine (recommended); false = full multi-filter engine
+input int    InpScalpMinScore             = 3;         // simple engine: min directional votes (of 5) - low = trades often
+input double InpScalpMinMomentumATR       = 0.12;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
+
 input group "=== CAPITAL PROTECTION ==="
 input double InpDailyLossPercent          = 4.0;
 input double InpMaxFloatingDDPercent      = 5.0;
@@ -1246,6 +1251,25 @@ void EvaluateFilters()
 //====================================================================
 //--- live-chart confirmation: current price agrees with EMA20 direction (uses the forming
 //--- bar's live bid/ask, so entries read the live chart, not just closed bars)
+//--- ULTRA-SCALP simple engine: 5 binary votes, no filter-score machinery.
+//--- Direction: net votes >= InpScalpMinScore AND live price agrees.
+//--- Votes: 1) EMA20 vs EMA50  2) close vs EMA20  3) last-bar momentum  4) MACD hist
+//---        5) candle body direction vs previous (continuation)
+int ScalpScore(int dir)
+{
+   int s=0;
+   double emaFast=g_ema20, emaSlow=g_ema50;
+   double c1=iClose(eaSymbol,PERIOD_M1,1), c2=iClose(eaSymbol,PERIOD_M1,2);
+   if(emaFast>0&&emaSlow>0){ if(dir>0&&emaFast>emaSlow)s++; if(dir<0&&emaFast<emaSlow)s++; }
+   if(emaFast>0){ if(dir>0&&c1>emaFast)s++; if(dir<0&&c1<emaFast)s++; }
+   double mom=(c1-c2)/MathMax(g_atr,broker.point*10);
+   if(dir>0&&mom>=InpScalpMinMomentumATR)s++;
+   if(dir<0&&mom<=-InpScalpMinMomentumATR)s++;
+   if(dir>0&&c1>c2)s++;
+   if(dir<0&&c1<c2)s++;
+   return s;
+}
+
 bool LiveMomentumConfirm(int dir)
 {
    if(g_ema20<=0)return true;                      // no EMA yet -> do not block
@@ -1658,18 +1682,35 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    if(g_paused){why="manual pause (F)";return false;}
    if(ShouldStopTrading()){why="risk breaker";return false;}if(WeekendOrRollover()){why="weekend/rollover";return false;}
    bool tr=false;w=CurrentWindow(tr);if(InpUseSessionFilter&&!tr){why="out of enabled session";return false;}if(w==WIN_NONE){why="no opportunity window";return false;}
-   RefreshWindowGating(w);if(g_ws[w].disabled){why="window expectancy disabled";return false;}
-   if(g_newsBlocked||ServerNow()<g_newsBlockedUntil){why="news/stabilization";return false;}if(IsDisorder()){why="market disorder";return false;}
+   if(g_newsBlocked||ServerNow()<g_newsBlockedUntil){why="news/stabilization";return false;}
    if(InSwapDangerWindow()){why="swap/rollover protection";return false;}
+   double sp=SpreadPoints();
+   if(sp>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";return false;}
+   if(sp>=(InpMaxSpreadPoints+20)*g_ptScale){why="spread extreme";return false;}   // > hard cap+20 = broken feed
+   double atrPts=(broker.point>0?g_atr/broker.point:0);
+   if(atrPts<InpMinATRPoints*g_ptScale){why="ATR chop";return false;}
+   // ============ ULTRA-SCALP SIMPLE PATH (default) ============
+   // Momentum + spread + risk. The multi-filter machinery below is only for
+   // InpSimpleScalpMode=false. A scalp engine must fire on clean setups, not
+   // survive a 14-item confluence checklist that can veto every bar.
+   if(InpSimpleScalpMode)
+   {
+      int ss=ScalpScore(dir);
+      if(ss<InpScalpMinScore){why="scalp votes "+IntegerToString(ss)+"/5";return false;}
+      if(!LiveMomentumConfirm(dir)){why="price vs EMA20";return false;}
+      setup="SCALP";hv=false;
+      if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}
+      if(!broker.hedging&&CountOwnPositions()>0){why="netting: one position";return false;}
+      if(CountOwnPositions()>=InpMaxConcurrentPositions){why="position cap";return false;}
+      return true;
+   }
+   RefreshWindowGating(w);if(g_ws[w].disabled){why="window expectancy disabled";return false;}
+   if(IsDisorder()){why="market disorder";return false;}
    if(g_slipCnt>=5&&g_slipAvg>InpMaxAverageSlippagePoints){why="slippage quality gate";return false;}
-   // Pre-trade slippage protection (not only the post-fill cooldown):
-   //  - last single fill was extreme -> stand aside for the cooldown
-   //  - current spread alone already eats the extreme-slippage budget -> stand aside
    if(g_lastSlipPts>=InpExtremeSlippagePoints&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";return false;}
-   if(SpreadPoints()>=(InpMaxSpreadPoints+20)*g_ptScale){why="spread extreme";return false;}   // > hard cap+20 = broken feed, not normal ECN spread
    if(!ExternalDataReady(why))return false;
-   double sp=SpreadPoints(),spp=SpreadPercentile();if(sp>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";return false;}if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
-   double atrPts=(broker.point>0?g_atr/broker.point:0);if(atrPts<InpMinATRPoints*g_ptScale){why="ATR chop";return false;}if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
+   double spp=SpreadPercentile();if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
+   if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
    double disp=CandleDisplacementATR();if(disp>InpMaxChaseCandleATR){why="anti-chase displacement";return false;}double cc=iClose(eaSymbol,PERIOD_M1,1);if(g_vwap>0&&g_atr>0&&MathAbs(cc-g_vwap)/g_atr>InpMaxEntryVWAPDeviationATR){why="anti-chase VWAP distance";return false;}
    if(InpFilterMode==FILTER_ALL_REQUIRED&&g_score<g_scoreMax){why="filters";return false;}if(InpFilterMode==FILTER_SCORING&&g_score<InpMinFilterScore){why="score";return false;}
    if(MathAbs(g_dirBias)<InpMinDirBias){why="weak directional bias";return false;}if((dir>0&&g_dirBias<0)||(dir<0&&g_dirBias>0)){why="bias conflict";return false;}
@@ -1841,14 +1882,23 @@ void TryArm()
    // order at signal time; EXEC_AUTO picks directional only in verified HV windows.
    int dir=(g_dirBias>0?1:-1);ENUM_WINDOW_ID w;bool hv=false;string setup,why;if(!CanEnter(dir,w,hv,setup,why)){g_gateReason=why;return;}
    bool directional=(InpExecutionMode==EXEC_DIRECTIONAL||(InpExecutionMode==EXEC_AUTO&&w==WIN_VERIFIED_EXPANSION));
-   double entry0=(dir>0?Ask():Bid());double atr=MathMax(g_atr,MinTradeDistance());double dist=(InpUseATRForDistance?InpATRMultiplier*atr:InpDistance*g_ptScale*broker.point);dist=MathMax(dist,MinTradeDistance());double pending=(dir>0?entry0+dist:entry0-dist);double sl=ComputeSL(dir,pending);double slDist=MathAbs(pending-sl);double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason="lot/risk zero";return;}
+   double entry0=(dir>0?Ask():Bid());double atr=MathMax(g_atr,MinTradeDistance());
+   double dist;
+   if(InpSimpleScalpMode){dist=0;}                       // market order: no pending distance
+   else{dist=(InpUseATRForDistance?InpATRMultiplier*atr:InpDistance*g_ptScale*broker.point);dist=MathMax(dist,MinTradeDistance());}
+   double pending=(dir>0?entry0+dist:entry0-dist);double sl=ComputeSL(dir,pending);double slDist=MathAbs(pending-sl);double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason="lot/risk zero";return;}
    double risk=PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots);if(!RiskRoom(risk,dir,w,why)){g_gateReason=why;return;}
    double t1,t2,t3;BuildThreeTargets(dir,pending,lots,w,hv,t1,t2,t3);
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
+   if(!InpSimpleScalpMode){
    if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";return;}
-   if(!RRValid(dir,pending,sl,t3,InpMinRR_TP3)){g_gateReason="TP3 R:R below floor";return;}
+   if(!RRValid(dir,pending,sl,t3,InpMinRR_TP3)){g_gateReason="TP3 R:R below floor";return;}}
    double net1=0;if(!NetProfitValid(dir,pending,t1,lots,InpMinNetProfitTP1Money,net1)){g_gateReason="TP1 not cost-positive";return;}
-   int layers=(directional?1:MathMax(1,MathMin(3,InpStraddleLayers)));if(hv&&InpAB_EnableHighVol)layers=MathMin(2,layers+1);int placed=0;double each=FloorVolume(lots/layers);if(each<=0){layers=1;each=lots;}
+   int layers=(directional?1:MathMax(1,MathMin(3,InpStraddleLayers)));if(hv&&InpAB_EnableHighVol)layers=MathMin(2,layers+1);
+   // Ultra-scalp mode: always a single MARKET order - pendings/straddles add latency
+   // and complexity that a scalp does not need.
+   if(InpSimpleScalpMode){directional=true;layers=1;}
+   int placed=0;double each=FloorVolume(lots/layers);if(each<=0){layers=1;each=lots;}
    for(int i=0;i<layers;i++)
    {
       // InpLayerStepATR adds progressive spacing per layer; InpScaleIn steps each
