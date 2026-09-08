@@ -2505,6 +2505,24 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 #define STATE_TAG 20260913
 string StateName(){return "PAT101_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)+".bin";}
 
+// Recount consecutive losses from actual closed deals (30-day lookback, this symbol+magic)
+int RecountConsecutiveLosses()
+{
+   int cons=0;
+   datetime from=TimeCurrent()-30*86400;
+   if(!HistorySelect(from,TimeCurrent()+60))return g_consecutiveLosses;
+   for(int i=HistoryDealsTotal()-1;i>=0;i--)
+   {
+      ulong tk=HistoryDealGetTicket(i);if(tk==0)continue;
+      if(HistoryDealGetInteger(tk,DEAL_MAGIC)!=InpMagicNumber)continue;
+      if(HistoryDealGetString(tk,DEAL_SYMBOL)!=eaSymbol)continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk,DEAL_ENTRY)!=DEAL_ENTRY_OUT)continue;
+      double p=HistoryDealGetDouble(tk,DEAL_PROFIT)+HistoryDealGetDouble(tk,DEAL_SWAP)+HistoryDealGetDouble(tk,DEAL_COMMISSION);
+      if(p<0)cons++;else break;   // streak broken by a win
+   }
+   return cons;
+}
+
 void SaveState()
 {
    if(!InpPersistState)return;int f=FileOpen(StateName(),FILE_BIN|FILE_WRITE|FILE_COMMON);if(f==INVALID_HANDLE)return;
@@ -3027,7 +3045,15 @@ int OnInit()
     int sy=(int)GlobalVariableGet("PAT_Y_"+eaSymbol+"_"+IntegerToString(InpMagicNumber));
     if(sx>=0&&sy>=0){g_x=sx;g_y=sy;}}
    ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
-   PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();OpenLog();IsNewBar();UpdateSpreadStats();UpdateIndicators();RefreshVolumeRatio();RefreshFMPMacro(true);UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();EventSetTimer(1);g_gateReason="initialized";DashUpdate(true);
+   PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();
+   // A consecutive-loss streak must never survive a restart as a halt: recount it from
+   // real deal history (the persisted counter is a stats value, not a live breaker).
+   if(InpPersistState)
+   {
+      g_consecutiveLosses=RecountConsecutiveLosses();
+      if(g_consecutiveLosses<InpMaxConsecutiveLosses)g_stopDay=false;   // fresh start
+      Print("Consecutive losses recounted from history: ",g_consecutiveLosses,"/",InpMaxConsecutiveLosses);
+   }OpenLog();IsNewBar();UpdateSpreadStats();UpdateIndicators();RefreshVolumeRatio();RefreshFMPMacro(true);UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();EventSetTimer(1);g_gateReason="initialized";DashUpdate(true);
    Print("Predict-A-Trade v1.00 initialized | ",eaSymbol," | digits=",broker.digits," ptScale=",g_ptScale," | server-UTC offset=",g_serverOffsetSec,"s | minVol=",broker.volumeMin," step=",broker.volumeStep," stops=",broker.stopsLevel," freeze=",broker.freezeLevel," hedging=",broker.hedging);
    Print("Broker: ",broker.company," | ",AccTypeName(broker.tradeMode)," account | leverage 1:",broker.leverage," | swap L/S ",DoubleToString(broker.swapLong,2),"/",DoubleToString(broker.swapShort,2));
    // Print the rollover-verification note only the FIRST time ever (persisted), so it
