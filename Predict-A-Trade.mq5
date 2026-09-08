@@ -56,7 +56,6 @@ enum ENUM_WINDOW_ID
 //====================================================================
 input group "=== ULTRA-SCALP MODE (SIMPLIFIED ENGINE) ==="
 input bool   InpSimpleScalpMode           = true;      // TRUE = simple M1 scalp engine (recommended); false = full multi-filter engine
-input int    InpScalpMinScore             = 4;      // 4/5 = strong alignment (2/5 gave 25% WR)         // simple engine: min directional votes (of 5) - low = trades often
 input double InpScalpMinMomentumATR       = 0.08;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
 
 input group "=== CAPITAL PROTECTION ==="
@@ -66,7 +65,7 @@ input double InpWeeklyLossLimit           = 8.0;
 input double InpMonthlyLossLimit          = 15.0;
 input double InpRiskPercent               = 0.50;
 input double InpRiskStepDownOnDD          = 0.10;
-input int    InpMaxConsecutiveLosses      = 2;      // 2 straight losses = pause (ultra-scalp frequency demands tighter lock)
+input int    InpMaxConsecutiveLosses      = 3;      // pause only after 3 straight; risk decays 30% per loss before that
 input int    InpMaxTradesPerDay           = 60;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
 input double InpMinLotMaxRiskPct          = 2.0;       // min-lot trade allowed only if its risk <= this % of balance
@@ -373,7 +372,7 @@ string eaSymbol="";
 
 int hATR=INVALID_HANDLE,hADX=INVALID_HANDLE,hEMA20=INVALID_HANDLE,hEMA50=INVALID_HANDLE;
 int hH1EMA20=INVALID_HANDLE,hH1EMA50=INVALID_HANDLE,hM15EMA20=INVALID_HANDLE,hM15EMA50=INVALID_HANDLE;
-int hRSI=INVALID_HANDLE;
+int hRSI=INVALID_HANDLE,hM5E20=INVALID_HANDLE,hM5E50=INVALID_HANDLE,hM5ADX=INVALID_HANDLE;
 
 double g_atr=0,g_adx=0,g_adxPlus=0,g_adxMinus=0,g_rsi=0;
 double g_ema20=0,g_ema50=0,g_h1e20=0,g_h1e50=0,g_m15e20=0,g_m15e50=0;
@@ -413,6 +412,10 @@ bool     g_webRequestWarned=false;
 int      g_fmp429Count=0;
 int      g_fmpCycle=0;
 bool     g_usdGotSPX=false;
+double   g_m5e20=0,g_m5e50=0,g_m5adx=0,g_m5adxPlus=0,g_m5adxMinus=0;
+double   g_rsi=0,g_bbUp=0,g_bbLo=0,g_bbMid=0;
+int      g_scalpSignal=0;   // +1 trend-long, -1 trend-short, +2 reversion-long, -2 reversion-short, 0 none
+string   g_scalpWhy="";
 double   g_spxBatchChg=0;
 string g_fmpLastErr="";
 datetime g_fmpLastTry=0,g_fmpLastOK=0;
@@ -1338,20 +1341,44 @@ void EvaluateFilters()
 //--- Direction: net votes >= InpScalpMinScore AND live price agrees.
 //--- Votes: 1) EMA20 vs EMA50  2) close vs EMA20  3) last-bar momentum  4) MACD hist
 //---        5) candle body direction vs previous (continuation)
-int ScalpScore(int dir)
+//--- ULTRA-SCALP ENGINE v2 (evidence-based):
+//--- Mode A trend-pullback: M5 trend + M1 pullback-to-EMA + reversal candle close.
+//--- Mode B mean-reversion: 2+ sigma extension from VWAP + RSI extreme + reversal
+//--- candle, ONLY when M5 ADX < 30 (reversion fails in strong trends).
+void EvaluateScalpSignal()
 {
-   int s=0;
-   double emaFast=g_ema20, emaSlow=g_ema50;
-   double c1=iClose(eaSymbol,PERIOD_M1,1), c2=iClose(eaSymbol,PERIOD_M1,2);
-   if(emaFast>0&&emaSlow>0){ if(dir>0&&emaFast>emaSlow)s++; if(dir<0&&emaFast<emaSlow)s++; }
-   if(emaFast>0){ if(dir>0&&c1>emaFast)s++; if(dir<0&&c1<emaFast)s++; }
-   double mom=(c1-c2)/MathMax(g_atr,broker.point*10);
-   if(dir>0&&mom>=InpScalpMinMomentumATR)s++;
-   if(dir<0&&mom<=-InpScalpMinMomentumATR)s++;
-   if(dir>0&&c1>c2)s++;
-   if(dir<0&&c1<c2)s++;
-   return s;
+   g_scalpSignal=0;g_scalpWhy="";
+   double c1=iClose(eaSymbol,PERIOD_M1,1),o1=iOpen(eaSymbol,PERIOD_M1,1);
+   double h1=iHigh(eaSymbol,PERIOD_M1,1),l1=iLow(eaSymbol,PERIOD_M1,1);
+   double c2=iClose(eaSymbol,PERIOD_M1,2),h2=iHigh(eaSymbol,PERIOD_M1,2),l2=iLow(eaSymbol,PERIOD_M1,2);
+   if(g_atr<=0)return;
+
+   // ---- M5 context
+   bool m5Up=(g_m5e20>g_m5e50),m5Dn=(g_m5e20<g_m5e50);
+   bool trendOK=(g_m5adx<30.0);           // ADX>=30: too strong for reversion
+   bool revOK=(g_m5adx>=20.0||g_m5adx<25.0); // informational; reversion gated by ADX<30 below
+
+   // ---- Mode A: trend pullback (M5 trend + M1 reversal candle back with trend)
+   // Pullback = price dipped to the M1 EMA20 zone, then a strong reversal candle closed
+   // back beyond the prior bar's extreme, with body >= InpScalpMinMomentumATR * ATR.
+   double minBody=InpScalpMinMomentumATR*g_atr;
+   bool pullbackLong=(m5Up&&c1>o1&&(c1-o1)>=minBody&&c1>h2&&l1<=g_ema20+0.10*g_atr);
+   bool pullbackShort=(m5Dn&&c1<o1&&(o1-c1)>=minBody&&c1<l2&&l1>=g_ema20-0.10*g_atr);
+   if(pullbackLong){g_scalpSignal=1;g_scalpWhy="trend-pullback LONG";return;}
+   if(pullbackShort){g_scalpSignal=-1;g_scalpWhy="trend-pullback SHORT";return;}
+
+   // ---- Mode B: mean reversion (M1) - extension from VWAP with RSI extreme
+   if(g_vwap>0&&g_rsi>0)
+   {
+      double dev=(c1-g_vwap)/g_atr;
+      bool extUp=(dev>=1.8),extDn=(dev<=-1.8);
+      bool revCandleDn=(c1<o1&&(o1-c1)>=minBody&&c1<h2),revCandleUp=(c1>o1&&(c1-o1)>=minBody&&c1>l2);
+      // RSI thresholds for M1 gold: 75/25 (research: gold-adjusted)
+      if(extUp&&g_rsi>=72.0&&revCandleDn&&g_m5adx<30.0){g_scalpSignal=-2;g_scalpWhy="mean-reversion SHORT";return;}
+      if(extDn&&g_rsi<=28.0&&revCandleUp&&g_m5adx<30.0){g_scalpSignal=2;g_scalpWhy="mean-reversion LONG";return;}
+   }
 }
+
 
 bool LiveMomentumConfirm(int dir)
 {
@@ -1621,6 +1648,11 @@ double CurrentRiskPct(ENUM_WINDOW_ID w,bool hv)
    double r=(InpSimpleScalpMode?0.35:InpRiskPercent);   // scalp base risk: bounded, small
    double dd=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
    if(dd>InpMaxFloatingDDPercent*0.5)r=MathMax(0.10,r-InpRiskStepDownOnDD);
+   // Consecutive-loss risk decay instead of a hard pause: each straight loss cuts the
+   // next trade's risk 30% (floor 0.10%). Trading continues; exposure self-corrects.
+   // Full pause only at the configured limit (breaker).
+   r*=MathPow(0.70,MathMin(4,g_consecutiveLosses));
+   if(r<0.10)r=0.10;
    r*=WindowRiskMultiplier(w);if(hv)r*=InpHVExtraSignalRiskMult;return r;
 }
 
@@ -1684,6 +1716,38 @@ double NearestLiquidityTarget(int dir,double entry,int lookback,double fallback)
    if(dir>0){for(int i=0;i<n;i++)if(r[i].high>entry && (best==0||r[i].high<best))best=r[i].high;}
    else {for(int i=0;i<n;i++)if(r[i].low<entry && (best==0||r[i].low>best))best=r[i].low;}
    return (best>0?best:fallback);
+}
+
+//--- Signal-aware SL/TP for the ultra-scalp engine:
+//--- trend-pullback: SL = 0.90 ATR (invalidation), TP1 = 0.45 ATR (1.2R effective)
+//--- mean-reversion: SL = beyond last bar extreme + 0.5 ATR (noise-proof),
+//---                 TP1 = VWAP (the mean) - the highest-probability target
+double ScalpStopDistance(int dir,double entry,double &slPrice)
+{
+   double atr=MathMax(g_atr,MinTradeDistance());
+   if(g_scalpSignal==2||g_scalpSignal==-2)   // reversion
+   {
+      double ext=(dir>0?iLow(eaSymbol,PERIOD_M1,1):iHigh(eaSymbol,PERIOD_M1,1));
+      slPrice=PriceNorm(ext-dir*0.5*atr);
+   }
+   else slPrice=ComputeSL(dir,entry);
+   double d=MathAbs(entry-slPrice);
+   double md=MinTradeDistance();
+   if(d<md){d=md;slPrice=PriceNorm(entry-dir*d);}
+   return d;
+}
+double ScalpTarget1(int dir,double entry)
+{
+   double atr=MathMax(g_atr,MinTradeDistance());
+   if((g_scalpSignal==2||g_scalpSignal==-2)&&g_vwap>0)
+   {
+      // target the mean, but at least 1.0x the SL distance is NOT required for
+      // reversion (high WR strategy): target = VWAP, min 0.6*ATR away
+      double d=MathAbs(g_vwap-entry);
+      if(d<0.6*atr)d=0.6*atr;
+      return PriceNorm(entry+dir*d);
+   }
+   return PriceNorm(entry+dir*0.45*atr);
 }
 
 double ComputeSL(int dir,double entry)
@@ -1810,22 +1874,21 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    // survive a 14-item confluence checklist that can veto every bar.
    if(InpSimpleScalpMode)
    {
-      int ss=ScalpScore(dir);
-      if(ss<InpScalpMinScore){why="scalp votes "+IntegerToString(ss)+"/5";return false;}
-      if(!LiveMomentumConfirm(dir)){why="price vs EMA20";return false;}
-      // Liquidity gate: solo Sydney / pre-dawn Tokyo hours produced 19 of 24 losses
-      // (thin book, noise momentum). Scalps only where sessions overlap or LDN/NY live.
+      // Ultra-scalp v2: signal comes from the two-mode engine (trend-pullback /
+      // mean-reversion), computed once per M1 bar in EvaluateScalpSignal().
+      // dir is matched to the signal's direction.
+      int want=(g_scalpSignal>0?1:-1);
+      if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";return false;}
+      setup=g_scalpWhy;
+      // Mean-reversion signals allowed in ANY session (Asian ranges included);
+      // trend-pullback signals only in liquid windows (research: momentum needs volume).
       bool liquid=(w==WIN_TOKYO_LONDON||w==WIN_LONDON_NY||w==WIN_LONDON_OPEN||w==WIN_NY_OPEN
                    ||w==WIN_LONDON||w==WIN_NEWYORK);
-      if(!liquid){why="thin session (SYD/TOK solo)";return false;}
-      // Higher-timeframe agreement: M1 scalps counter to the H1 trend are the exact
-      // pattern that produced the screenshot's stacked losing buys.
-      bool htfUp=(g_m15e20>g_m15e50);
-      bool htfFlat=(g_m15e20>0&&g_m15e50>0&&MathAbs(g_m15e20-g_m15e50)<=0.15*MathMax(g_atr,MinTradeDistance()));
-      if(!htfFlat&&((dir>0&&!htfUp)||(dir<0&&htfUp))){why="HTF (M15) disagrees";return false;}
-      // Anti-stacking: no second scalp in the same direction within 60s OR within
-      // 0.35*ATR of an open same-direction entry. Three identical buys in 3 seconds
-      // tripled the screenshot's loss.
+      if(g_scalpSignal==1||g_scalpSignal==-1)
+      {
+         if(!liquid){why="trend signal in thin session";return false;}
+      }
+      // Anti-stacking: no second scalp same direction within 60s or 0.35 ATR of an open one
       datetime now=ServerNow();
       if(g_lastEntryTime>0&&now-g_lastEntryTime<60){why="entry spacing 60s";return false;}
       double px=(dir>0?Ask():Bid());
@@ -1837,7 +1900,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
          double op=PositionGetDouble(POSITION_PRICE_OPEN);
          if(MathAbs(px-op)<0.35*MathMax(g_atr,MinTradeDistance())){why="too close to open scalp";return false;}
       }
-      setup="SCALP";hv=false;
+      hv=false;
       if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}
       if(!broker.hedging&&CountOwnPositions()>0){why="netting: one position";return false;}
       if(CountOwnPositions()>=InpMaxConcurrentPositions){why="position cap";return false;}
@@ -2036,14 +2099,9 @@ void TryArm()
    int dir;
    if(InpSimpleScalpMode)
    {
-      // Direction comes from the scalp engine itself: score BOTH sides, trade the
-      // stronger (ties -> EMA20 side). The 14-filter bias must not veto scalp setups.
-      int up=ScalpScore(1),dn=ScalpScore(-1);
-      if(up>=InpScalpMinScore&&up>dn)dir=1;
-      else if(dn>=InpScalpMinScore&&dn>up)dir=-1;
-      else if(up>=InpScalpMinScore)dir=1;
-      else if(dn>=InpScalpMinScore)dir=-1;
-      else{g_gateReason="scalp votes 0/5";return;}
+      // Direction comes from the two-mode signal computed on the last closed bar.
+      if(g_scalpSignal>0)dir=1;else if(g_scalpSignal<0)dir=-1;
+      else{g_gateReason="no scalp signal";return;}
    }
    else dir=(g_dirBias>0?1:-1);
    ENUM_WINDOW_ID w;bool hv=false;string setup,why;if(!CanEnter(dir,w,hv,setup,why)){g_gateReason=why;return;}
@@ -2052,9 +2110,24 @@ void TryArm()
    double dist;
    if(InpSimpleScalpMode){dist=0;}                       // market order: no pending distance
    else{dist=(InpUseATRForDistance?InpATRMultiplier*atr:InpDistance*g_ptScale*broker.point);dist=MathMax(dist,MinTradeDistance());}
-   double pending=(dir>0?entry0+dist:entry0-dist);double sl=ComputeSL(dir,pending);double slDist=MathAbs(pending-sl);double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason="lot/risk zero";return;}
+   double pending=(dir>0?entry0+dist:entry0-dist);double sl;double slDist;
+   if(InpSimpleScalpMode)
+   {
+      slDist=ScalpStopDistance(dir,entry0,sl);   // signal-aware stop (slPrice by ref)
+      sl=PriceNorm(sl);
+   }
+   else{sl=ComputeSL(dir,pending);slDist=MathAbs(pending-sl);}
+   double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason="lot/risk zero";return;}
    double risk=PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots);if(!RiskRoom(risk,dir,w,why)){g_gateReason=why;return;}
-   double t1,t2,t3;BuildThreeTargets(dir,pending,lots,w,hv,t1,t2,t3);
+   double t1,t2,t3;
+   if(InpSimpleScalpMode)
+   {
+      t1=ScalpTarget1(dir,entry0);
+      // single-target scalp: TP2/TP3 trail beyond for the runner
+      double atr2=MathMax(g_atr,MinTradeDistance());
+      t2=PriceNorm(t1+dir*0.40*atr2);t3=PriceNorm(t1+dir*0.85*atr2);
+   }
+   else BuildThreeTargets(dir,pending,lots,w,hv,t1,t2,t3);
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
    if(!InpSimpleScalpMode){
    if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";return;}
@@ -2079,7 +2152,10 @@ void TryArm()
       if(directional&&i==0)
       {
          double fill=0;
-         if(MarketOrder(dir,li,ComputeSL(dir,entry0),c,cmt,fill,tk))placed++;
+         {
+            double osl;ScalpStopDistance(dir,entry0,osl);
+            if(MarketOrder(dir,li,osl,c,cmt,fill,tk))placed++;
+         }
       }
       else if(PlaceStop(dir,li,p,lsl,c,cmt,tk))placed++;
    }
@@ -2892,8 +2968,8 @@ int OnInit()
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))Print("WARNING: AutoTrading is OFF - enable the Algo Trading button to allow entries.");
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))Print("WARNING: MQL trade permission denied - check Allow Algo Trading in EA settings.");
    if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))Print("WARNING: Account forbids expert trading.");
-   hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);
-   if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
+   hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);hM5E20=iMA(eaSymbol,PERIOD_M5,20,0,MODE_EMA,PRICE_CLOSE);hM5E50=iMA(eaSymbol,PERIOD_M5,50,0,MODE_EMA,PRICE_CLOSE);hM5ADX=iADX(eaSymbol,PERIOD_M5,14);
+   if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE||hM5E20==INVALID_HANDLE||hM5E50==INVALID_HANDLE||hM5ADX==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
    g_x=InpPanelX;g_y=InpPanelY;
    if(GlobalVariableCheck("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)))
    {int sx=(int)GlobalVariableGet("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber));
@@ -2917,13 +2993,32 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();if(InpPersistState)SaveState();if(g_log!=INVALID_HANDLE){FileFlush(g_log);FileClose(g_log);g_log=INVALID_HANDLE;}WriteWindowReport();WritePerformanceReport();DashDestroy();
-   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);PrintSummary();
+   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);if(hM5E20!=INVALID_HANDLE)IndicatorRelease(hM5E20);if(hM5E50!=INVALID_HANDLE)IndicatorRelease(hM5E50);if(hM5ADX!=INVALID_HANDLE)IndicatorRelease(hM5ADX);PrintSummary();
 }
 
 void OnTick()
 {
    RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();bool nb=IsNewBar();UpdateIndicators();RefreshFMPMacro(false);
-   if(nb){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);}else EvaluateFilters();
+   if(nb){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);
+      // ultra-scalp v2 state
+      double rsiBuf[1];if(CopyBuffer(hRSI,0,1,1,rsiBuf)>0)g_rsi=rsiBuf[0];
+      double e20[1],e50[1],adx[1],adxp[1],adxm[1];
+      if(CopyBuffer(hM5E20,0,1,1,e20)>0)g_m5e20=e20[0];
+      if(CopyBuffer(hM5E50,0,1,1,e50)>0)g_m5e50=e50[0];
+      if(CopyBuffer(hM5ADX,0,0,1,adx)>0)g_m5adx=adx[0];
+      if(CopyBuffer(hM5ADX,1,0,1,adxp)>0)g_m5adxPlus=adxp[0];
+      if(CopyBuffer(hM5ADX,2,0,1,adxm)>0)g_m5adxMinus=adxm[0];
+      // Bollinger 20,2 on M1 closes (manual std over 20 bars)
+      double closes[20];ArraySetAsSeries(closes,false);
+      if(CopyClose(eaSymbol,PERIOD_M1,1,20,closes)==20)
+      {
+         double sum=0;for(int k=0;k<20;k++)sum+=closes[k];g_bbMid=sum/20.0;
+         double v=0;for(int k=0;k<20;k++){double d=closes[k]-g_bbMid;v+=d*d;}
+         double sd=MathSqrt(v/20.0);
+         g_bbUp=g_bbMid+2.0*sd;g_bbLo=g_bbMid-2.0*sd;
+      }
+      EvaluateScalpSignal();
+   }else EvaluateFilters();
    if((g_stopDay||g_stopWeek||g_stopMonth)&&InpBreakerAction==BREAKER_CLOSE_ALL)EmergencyCloseAll();
    EnforceSwapFlat();
    if(g_lastLossDir!=0)TryRecovery();
