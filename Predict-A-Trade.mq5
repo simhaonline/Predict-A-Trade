@@ -288,8 +288,8 @@ input group "=== LOGGING / DASHBOARD ==="
 input bool   InpUseLogFile                = true;
 input bool   InpPersistState              = true;
 input bool   InpShowDashboard             = true;
-input int    InpPanelX                    = 8;         // initial panel X (drag header to move)
-input int    InpPanelY                    = 24;        // initial panel Y (drag header to move)
+input int    InpPanelX                    = 430;       // initial panel X (clear of left dock; drag header to move)
+input int    InpPanelY                    = 30;        // initial panel Y (drag header to move)
 input int    InpPanelFontSize             = 8;         // 6..12; 8 recommended - all values readable
 input int    InpDashRefreshMs             = 400;       // dashboard repaint throttle (CPU friendly)
 input string InpPanelTitle                = "PREDICT-A-TRADE GOLD";  // panel header title
@@ -420,6 +420,7 @@ int      g_recoveryLegs=0;
 
 #define SPREAD_SAMPLES 256
 double g_spreadBuf[SPREAD_SAMPLES]; int g_spreadCnt=0,g_spreadIdx=0; double g_spreadAvg=0;
+double g_spreadStd=0;
 #define SLIP_SAMPLES 64
 double g_slipBuf[SLIP_SAMPLES]; int g_slipCnt=0,g_slipIdx=0; double g_slipAvg=0;
 #define ATR_SAMPLES 512
@@ -466,7 +467,7 @@ color C_SYD_DIM=C'20,60,90',C_TOK_DIM=C'50,32,90',C_LON_DIM=C'90,54,0',C_NY_DIM=
 #define L_SECTIONS 3
 #define L_ROWS     16
 #define R_SECTIONS 4
-#define R_ROWS     20
+#define R_ROWS     22
 int g_font=7,g_fontPx=9,g_dpi=96;
 double g_dpiScale=1.0;
 int g_rh=16,g_hdrH=30,g_colW=300,g_pad=12,g_gap=14,g_panelW=0;
@@ -852,6 +853,8 @@ void UpdateSpreadStats()
    double s=SpreadPoints(); if(s<=0||s>10000) return;
    g_spreadBuf[g_spreadIdx]=s; g_spreadIdx=(g_spreadIdx+1)%SPREAD_SAMPLES; if(g_spreadCnt<SPREAD_SAMPLES)g_spreadCnt++;
    double sum=0;for(int i=0;i<g_spreadCnt;i++)sum+=g_spreadBuf[i];g_spreadAvg=(g_spreadCnt?sum/g_spreadCnt:s);
+   double ss=0;for(int i=0;i<g_spreadCnt;i++){double d=g_spreadBuf[i]-g_spreadAvg;ss+=d*d;}
+   g_spreadStd=(g_spreadCnt>1?MathSqrt(ss/g_spreadCnt):0);
 }
 
 double PercentileRank(const double &a[],int n,double v)
@@ -1290,12 +1293,14 @@ bool IsHighVolatilityQualified(int dir,int &score)
 bool IsDisorder()
 {
    datetime now=ServerNow();if(g_disorderUntil>now)return true;
-   // Disorder = microstructure breakdown only: extreme spread percentile or realised
-   // slippage. Candle displacement is NOT a halt condition - the anti-chase entry filter
-   // (InpMaxChaseCandleATR) already rejects chasing individual fast bars, and halting all
-   // trading on every gold spike kept the EA permanently gated.
-   double sp=SpreadPercentile();
-   if(sp>=InpDisorderSpreadPct || (g_slipCnt>=5&&g_slipAvg>=InpDisorderSlipPts))
+   // Disorder = microstructure breakdown only. A high spread PERCENTILE alone is noise
+   // on brokers whose spread is near-constant (p100 == normal 40pt on Xelans), so the
+   // relative spike must ALSO breach the absolute hard cap before halting. Realised
+   // slippage stays an independent trigger.
+   double sp=SpreadPoints();
+   if(SpreadPercentile()>=InpDisorderSpreadPct && sp>InpMaxSpreadPoints*g_ptScale)
+   {g_disorderUntil=now+InpDisorderCooldownMinutes*60;return true;}
+   if(g_slipCnt>=5&&g_slipAvg>=InpDisorderSlipPts)
    {g_disorderUntil=now+InpDisorderCooldownMinutes*60;return true;}
    return false;
 }
@@ -2590,7 +2595,9 @@ void DashUpdate(bool force=false)
       string bn=UI_PREFIX+"BTN_P";
       if(ObjectFind(0,bn)<0){ObjectCreate(0,bn,OBJ_BUTTON,0,0,0);ObjectSetInteger(0,bn,OBJPROP_CORNER,CORNER_LEFT_UPPER);ObjectSetInteger(0,bn,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,bn,OBJPROP_HIDDEN,true);ObjectSetInteger(0,bn,OBJPROP_ZORDER,10);}
       ObjectSetInteger(0,bn,OBJPROP_XDISTANCE,bx);ObjectSetInteger(0,bn,OBJPROP_YDISTANCE,by);
-      ObjectSetInteger(0,bn,OBJPROP_XSIZE,SX(120));ObjectSetInteger(0,bn,OBJPROP_YSIZE,g_rh+2);
+      ObjectSetInteger(0,bn,OBJPROP_XSIZE,SX(120));ObjectSetInteger(0,bn,OBJPROP_YSIZE,g_rh);
+      // Buttons auto-grow beyond YSIZE under DPI scaling (system metrics); give the row
+      // a full extra row of clearance so it can never sit on the next section bar.
       ObjectSetString(0,bn,OBJPROP_TEXT,(g_paused?"RESUME":"PAUSE ARMING"));
       ObjectSetString(0,bn,OBJPROP_FONT,"Consolas");ObjectSetInteger(0,bn,OBJPROP_FONTSIZE,FontOut(g_font));
       ObjectSetInteger(0,bn,OBJPROP_COLOR,(g_paused?C_UP_TXT:C_WARN_TXT));
@@ -2598,7 +2605,7 @@ void DashUpdate(bool force=false)
       ObjectSetInteger(0,bn,OBJPROP_BORDER_COLOR,C_BORDER);
       ObjectSetInteger(0,bn,OBJPROP_STATE,false);
    }
-   yR+=g_rh+SX(6);
+   yR+=g_rh*2+SX(4);
 
    RecountTodayStats();
    DashSection("RP",1,yR,"performance");
@@ -2655,7 +2662,12 @@ int OnInit()
    if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))Print("WARNING: Account forbids expert trading.");
    hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);
    if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
-   g_x=InpPanelX;g_y=InpPanelY;ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
+   g_x=InpPanelX;g_y=InpPanelY;
+   if(GlobalVariableCheck("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)))
+   {int sx=(int)GlobalVariableGet("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber));
+    int sy=(int)GlobalVariableGet("PAT_Y_"+eaSymbol+"_"+IntegerToString(InpMagicNumber));
+    if(sx>=0&&sy>=0){g_x=sx;g_y=sy;}}
+   ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
    PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();OpenLog();IsNewBar();UpdateSpreadStats();UpdateIndicators();RefreshVolumeRatio();RefreshFMPMacro(true);UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();EventSetTimer(1);g_gateReason="initialized";DashUpdate(true);
    Print("Predict-A-Trade v1.00 initialized | ",eaSymbol," | digits=",broker.digits," ptScale=",g_ptScale," | server-UTC offset=",g_serverOffsetSec,"s | minVol=",broker.volumeMin," step=",broker.volumeStep," stops=",broker.stopsLevel," freeze=",broker.freezeLevel," hedging=",broker.hedging);
    Print("Broker: ",broker.company," | ",AccTypeName(broker.tradeMode)," account | leverage 1:",broker.leverage," | swap L/S ",DoubleToString(broker.swapLong,2),"/",DoubleToString(broker.swapShort,2));
@@ -2756,6 +2768,8 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
          if(nx!=g_x||ny!=g_y)
          {
             g_x=nx;g_y=ny;
+            GlobalVariableSet("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber),g_x);
+            GlobalVariableSet("PAT_Y_"+eaSymbol+"_"+IntegerToString(InpMagicNumber),g_y);
             // throttle during drag for smoothness
             if(now-g_lastDragMs>=(uint)MathMax(30,InpDashRefreshMs/4)){g_lastDragMs=now;DashUpdate(true);}
          }
