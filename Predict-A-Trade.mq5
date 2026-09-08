@@ -404,6 +404,7 @@ int    g_spxBias=0;
 bool   g_spxAvailable=false;
 bool   g_fmpEverOK=false;
 int    g_fmpErrCount=0;
+bool     g_webRequestWarned=false;
 string g_fmpLastErr="";
 datetime g_fmpLastTry=0,g_fmpLastOK=0;
 int    g_fmpNewsCount=0;
@@ -900,7 +901,22 @@ int HttpGet(string url,int timeoutMs,string &body)
    string headers="User-Agent: Predict-A-Trade/1.00\r\nAccept: application/json\r\n";
    ResetLastError();
    int code=WebRequest("GET",url,"","",timeoutMs,post,0,result,rh);
-   if(code<200||code>=300){ g_fmpLastErr="http "+IntegerToString(code)+" err "+IntegerToString(GetLastError()); return -1; }
+   if(code<200||code>=300)
+   {
+      int err=GetLastError();
+      g_fmpLastErr="http "+IntegerToString(code)+" err "+IntegerToString(err);
+      // 4014 = ERR_FUNCTION_NOT_ALLOWED: this URL is not in the terminal's WebRequest
+      // whitelist. Raise ONE unmissable popup per session (not per poll), with the exact fix.
+      if(err==4014 && !g_webRequestWarned)
+      {
+         g_webRequestWarned=true;
+         string host=url;
+         int p1=StringFind(host,"//"); if(p1>0)host=StringSubstr(host,p1+2);
+         int p2=StringFind(host,"/");  if(p2>0)host=StringSubstr(host,0,p2);
+         Alert("FMP feed blocked (err 4014). FIX: Tools > Options > Expert Advisors > tick 'Allow WebRequest for listed URL' and add:  https://",host,"   Then click OK and re-attach the EA. Until then the macro layer runs on broker EURUSD fallback.");
+      }
+      return -1;
+   }
    body=CharArrayToString(result,0,-1,CP_UTF8);
    return code;
 }
