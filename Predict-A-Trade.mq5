@@ -2799,7 +2799,14 @@ int OnInit()
    PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();OpenLog();IsNewBar();UpdateSpreadStats();UpdateIndicators();RefreshVolumeRatio();RefreshFMPMacro(true);UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();EventSetTimer(1);g_gateReason="initialized";DashUpdate(true);
    Print("Predict-A-Trade v1.00 initialized | ",eaSymbol," | digits=",broker.digits," ptScale=",g_ptScale," | server-UTC offset=",g_serverOffsetSec,"s | minVol=",broker.volumeMin," step=",broker.volumeStep," stops=",broker.stopsLevel," freeze=",broker.freezeLevel," hedging=",broker.hedging);
    Print("Broker: ",broker.company," | ",AccTypeName(broker.tradeMode)," account | leverage 1:",broker.leverage," | swap L/S ",DoubleToString(broker.swapLong,2),"/",DoubleToString(broker.swapShort,2));
-   Print("Swap rollover assumed at ",DoubleToString(InpSwapRolloverServerHour,2)," server time - VERIFY: positions held over this hour must show a swap entry in History; if the swap posts at a different hour, adjust InpSwapRolloverServerHour.");
+   // Print the rollover-verification note only the FIRST time ever (persisted), so it
+   // reads as one-time setup guidance rather than a recurring warning.
+   string gvKey="PAT_SWAP_NOTE_"+eaSymbol+"_"+IntegerToString(InpMagicNumber);
+   if(!GlobalVariableCheck(gvKey))
+   {
+      Print("Swap rollover assumed at ",DoubleToString(InpSwapRolloverServerHour,2)," server time. One-time check: hold or review a position that crosses this hour - the History tab must show a swap entry at that hour. If the swap posts at a different hour, set InpSwapRolloverServerHour to it. This message will not repeat.");
+      GlobalVariableSet(gvKey,1);
+   }
    return INIT_SUCCEEDED;
 }
 
