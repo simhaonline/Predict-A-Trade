@@ -877,7 +877,13 @@ void PushATR(double x)
    if(g_atrCnt<g_atrKeep)g_atrCnt++;
 }
 double ATRPercentile(){ return PercentileRank(g_atrBuf,g_atrCnt,g_atr); }
-void PushSlippage(double s){ s=MathAbs(s);g_lastSlipPts=s;g_slipBuf[g_slipIdx]=s;g_slipIdx=(g_slipIdx+1)%SLIP_SAMPLES;if(g_slipCnt<SLIP_SAMPLES)g_slipCnt++;double z=0;for(int i=0;i<g_slipCnt;i++)z+=g_slipBuf[i];g_slipAvg=(g_slipCnt?z/g_slipCnt:0); }
+void PushSlippage(double s)
+{
+   s=MathAbs(s);
+   if(s>1000.0) s=0;   // insane value (uninitialized intended price) - never poison the ring
+   g_lastSlipPts=s;g_slipBuf[g_slipIdx]=s;g_slipIdx=(g_slipIdx+1)%SLIP_SAMPLES;if(g_slipCnt<SLIP_SAMPLES)g_slipCnt++;
+   double z=0;for(int i=0;i<g_slipCnt;i++)z+=g_slipBuf[i];g_slipAvg=(g_slipCnt?z/g_slipCnt:0);
+}
 double SlippagePercentile(){ return PercentileRank(g_slipBuf,g_slipCnt,g_lastSlipPts); }//====================================================================
 // FMP MACRO / NEWS (stable REST; credentials obfuscated, runtime-decoded)
 //====================================================================
@@ -1513,7 +1519,7 @@ int CountOwnPendings()
 
 double CurrentRiskPct(ENUM_WINDOW_ID w,bool hv)
 {
-   double r=InpRiskPercent;double dd=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
+   double r=(InpSimpleScalpMode?0.35:InpRiskPercent);   // scalp base risk: bounded, smalldouble dd=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
    if(dd>InpMaxFloatingDDPercent*0.5)r=MathMax(0.10,r-InpRiskStepDownOnDD);
    r*=WindowRiskMultiplier(w);if(hv)r*=InpHVExtraSignalRiskMult;return r;
 }
@@ -1704,6 +1710,24 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       int ss=ScalpScore(dir);
       if(ss<InpScalpMinScore){why="scalp votes "+IntegerToString(ss)+"/5";return false;}
       if(!LiveMomentumConfirm(dir)){why="price vs EMA20";return false;}
+      // Higher-timeframe agreement: M1 scalps counter to the H1 trend are the exact
+      // pattern that produced the screenshot's stacked losing buys.
+      bool htfUp=(g_m15e20>g_m15e50);
+      if((dir>0&&!htfUp)||(dir<0&&htfUp)){why="HTF (M15) disagrees";return false;}
+      // Anti-stacking: no second scalp in the same direction within 60s OR within
+      // 0.35*ATR of an open same-direction entry. Three identical buys in 3 seconds
+      // tripled the screenshot's loss.
+      datetime now=ServerNow();
+      if(g_lastEntryTime>0&&now-g_lastEntryTime<60){why="entry spacing 60s";return false;}
+      double px=(dir>0?Ask():Bid());
+      for(int i=0;i<PositionsTotal();i++)
+      {
+         ulong t=PositionGetTicket(i);if(!t||!PositionSelectByTicket(t))continue;
+         if(PositionGetString(POSITION_SYMBOL)!=eaSymbol||PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber)continue;
+         if((int)PositionGetInteger(POSITION_TYPE)!=(dir>0?POSITION_TYPE_BUY:POSITION_TYPE_SELL))continue;
+         double op=PositionGetDouble(POSITION_PRICE_OPEN);
+         if(MathAbs(px-op)<0.35*MathMax(g_atr,MinTradeDistance())){why="too close to open scalp";return false;}
+      }
       setup="SCALP";hv=false;
       if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}
       if(!broker.hedging&&CountOwnPositions()>0){why="netting: one position";return false;}
@@ -1947,6 +1971,7 @@ void TryRecovery()
 {
    string why="";
    if(!InpUseRecovery)return;
+   if(InpSimpleScalpMode)return;   // loss-chasing counter-trades disabled in ultra-scalp mode
    // A reversal leg requires a hedging account: on netting the opposite deal would
    // just close the surviving position instead of opening the recovery trade.
    if(!broker.hedging)return;
@@ -2139,8 +2164,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       if(trans.order>0&&HistoryOrderSelect(trans.order))
       {
          double intended=HistoryOrderGetDouble(trans.order,ORDER_PRICE_OPEN);
-         double raw=(dt==DEAL_TYPE_BUY?(price-intended):(intended-price))/broker.point;
-         slip=raw-SpreadPoints();                     // spread is cost, not slippage
+         if(intended>0)   // market orders may report 0 as requested price -> no measurement
+         {
+            double raw=(dt==DEAL_TYPE_BUY?(price-intended):(intended-price))/broker.point;
+            slip=raw-SpreadPoints();                 // spread is cost, not slippage
+         }
+         else slip=0;
       }
       PushSlippage(slip);
       if(MathAbs(slip)>=InpExtremeSlippagePoints){g_disorderUntil=ServerNow()+InpSlippageCooldownMinutes*60;}
