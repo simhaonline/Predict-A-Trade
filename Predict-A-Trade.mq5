@@ -290,7 +290,7 @@ input bool   InpPersistState              = true;
 input bool   InpShowDashboard             = true;
 input int    InpPanelX                    = 8;         // initial panel X (drag header to move)
 input int    InpPanelY                    = 24;        // initial panel Y (drag header to move)
-input int    InpPanelFontSize             = 7;         // 6..12; small font = more values on screen
+input int    InpPanelFontSize             = 8;         // 6..12; 8 recommended - all values readable
 input int    InpDashRefreshMs             = 400;       // dashboard repaint throttle (CPU friendly)
 input string InpPanelTitle                = "PREDICT-A-TRADE GOLD";  // panel header title
 input bool   InpPanelDraggable            = true;      // drag the header to move the panel
@@ -450,13 +450,13 @@ int g_log=INVALID_HANDLE;
 #define UI_PREFIX "PAT4_"
 
 //--- dashboard colour system: deep navy base, high-contrast text, semantic status colours
-color C_BG=C'11,14,21',C_BG2=C'17,22,32',C_PANEL=C'20,26,38',C_SECTION=C'30,42,62',C_SECTION_TXT=C'158,193,255';
-color C_TXT=C'228,234,244',C_TXT2=C'176,186,204',C_DIM=C'120,130,148',C_GRAY=C'92,100,114',C_GRID=C'44,53,70';
-color C_HDR=C'24,34,52',C_ACCENT=C'58,123,213',C_BORDER=C'48,58,78';
-color C_UP=C'46,204,113',C_UP_TXT=C'126,240,175',C_DN=C'231,76,60',C_DN_TXT=C'255,138,128';
-color C_WARN=C'241,196,15',C_WARN_TXT=C'255,216,92',C_INFO=C'52,152,219',C_GOLD=C'240,180,41',C_GOLD_TXT=C'255,205,92';
-color C_SYD=C'86,180,233',C_TOK=C'120,132,240',C_LON=C'255,159,64',C_NY=C'110,220,140';
-color C_SYD_DIM=C'34,58,78',C_TOK_DIM=C'36,42,86',C_LON_DIM=C'84,58,26',C_NY_DIM=C'40,72,50';
+color C_BG=C'0,0,0',C_BG2=C'10,12,16',C_PANEL=C'6,8,12',C_SECTION=C'16,24,40',C_SECTION_TXT=C'120,220,255';
+color C_TXT=C'255,255,255',C_TXT2=C'208,216,232',C_DIM=C'150,160,180',C_GRAY=C'110,120,140',C_GRID=C'40,48,64';
+color C_HDR=C'12,18,30',C_ACCENT=C'0,160,255',C_BORDER=C'70,80,100';
+color C_UP=C'0,230,118',C_UP_TXT=C'0,255,140',C_DN=C'255,64,64',C_DN_TXT=C'255,110,110';
+color C_WARN=C'255,193,7',C_WARN_TXT=C'255,224,102',C_INFO=C'64,196,255',C_GOLD=C'255,193,7',C_GOLD_TXT=C'255,215,64';
+color C_SYD=C'0,176,255',C_TOK=C'155,89,255',C_LON=C'255,145,0',C_NY=C'0,230,118';
+color C_SYD_DIM=C'20,60,90',C_TOK_DIM=C'50,32,90',C_LON_DIM=C'90,54,0',C_NY_DIM=C'20,80,50';
 
 //--- dashboard geometry (recomputed from InpPanelFontSize)
 // Flow layout: columns are drawn with a running Y cursor and every string is
@@ -2256,7 +2256,7 @@ string ClipText(string s,int maxW,int fs)
    if(StringLen(s)==0) return s;
    // Measure with the EXACT font/size the label renders in; TextGetSize without
    // TextSetFont uses terminal defaults whose metrics differ from Consolas.
-   TextSetFont("Consolas",FontOut(fs),FW_DONTCARE,0,0);
+   TextSetFont("Consolas",FontOut(fs),FW_DONTCARE,0);
    uint w=0,h=0;
    if(!TextGetSize(s,w,h)) return s;
    if((int)w<=maxW) return s;
@@ -2282,7 +2282,7 @@ void UIRecompute()
    g_fontPx=(int)MathRound(g_font*g_dpiScale);      // rendered glyph height in px
    g_rh=(int)MathRound((g_font+7)*g_dpiScale);      // row pitch scales with glyphs
    g_hdrH=(int)MathRound((g_font+19)*g_dpiScale);
-   g_colW=SX(300);
+   g_colW=SX(340);
    g_pad=MathMax(8,SX(12));
    g_gap=MathMax(8,SX(14));
    g_panelW=g_pad*2+g_colW*2+g_gap;
@@ -2350,7 +2350,7 @@ void DashRowSplit(string n,int col,int &y,string left,string right,color cl,colo
    {
       UILabel("R_"+n,x,y+MathMax(0,(g_rh-g_fontPx)/2),ClipText(left,g_colW-100,g_font),cl,g_font);
       uint w=0,h=0;string r=ClipText(right,SX(96),g_font);
-      TextSetFont("Consolas",FontOut(g_font),FW_DONTCARE,0,0);
+      TextSetFont("Consolas",FontOut(g_font),FW_DONTCARE,0);
       TextGetSize(r,w,h);
       UILabel("R_"+n+"b",x+g_colW-12-SX(4)-(int)w,y+MathMax(0,(g_rh-g_fontPx)/2),r,cr,g_font);
    }
@@ -2503,9 +2503,9 @@ void DashUpdate(bool force=false)
    bool ovSYDTOK=InWindowMinutes(um,so,sc)&&InWindowMinutes(um,to,tc);
    bool ovTOKLON=InWindowMinutes(um,to,tc)&&InWindowMinutes(um,lo,lc);
    bool ovLONNY =InWindowMinutes(um,lo,lc)&&InWindowMinutes(um,no,nc);
-   string ovTxt="Overlap: "+(ovLONNY?"LON/NY":(ovTOKLON?"TOK/LON":(ovSYDTOK?"SYD/TOK":"none")));
+   string ovShort=(ovLONNY?"L+NY":(ovTOKLON?"T+L":(ovSYDTOK?"S+T":"--")));
    string utcHM=StringFormat("%02d:%02d",um/60,um%60);
-   DashRow("L_TIME",0,yL,ovTxt+"  SRV "+TimeToString(ServerNow(),TIME_SECONDS)+"  UTC "+utcHM,C_TXT);
+   DashRow("L_TIME",0,yL,"OVL "+ovShort+"  SRV "+TimeToString(ServerNow(),TIME_SECONDS)+"  UTC "+utcHM,C_TXT);
    DashRow("L_SPRD",0,yL,"Spread "+DoubleToString(sp,0)+"pt (p"+DoubleToString(spp,0)+")",
            (sp>InpMaxSpreadPoints*g_ptScale?C_DN_TXT:(spp>InpMaxSpreadPercentile?C_WARN_TXT:C_TXT)));
    DashRow("L_ATR",0,yL,"ATR "+IntegerToString(atrPts)+"pt (p"+DoubleToString(ap,0)+") ["+DoubleToString(InpMinATRPoints*g_ptScale,0)+".."+DoubleToString(InpMaxATRPoints*g_ptScale,0)+"]",
@@ -2593,14 +2593,14 @@ void DashUpdate(bool force=false)
 
    //================ 24H UTC SESSION TIMELINE (flow) =====================
    int tlTop=MathMax(yL,yR)+SX(6);
-   int labW=SX(58);
+   int labW=SX(34);
    int barX=x+g_pad+labW,barW=g_panelW-g_pad*2-labW;
    UIRect("TL_BG",x+g_pad,tlTop,g_panelW-g_pad*2,g_tlH,C_BG2);
-   UILabel("TL_H",x+g_pad+4,tlTop+2,"24H UTC SESSION MAP",C_SECTION_TXT,MathMax(6,g_font-1));
+   UILabel("TL_H",x+g_pad+4,tlTop+2,"SESSION MAP (UTC)",C_SECTION_TXT,MathMax(6,g_font-1));
    int rowY[4];
    int openM[4],closeM[4];
    openM[0]=so;closeM[0]=sc;openM[1]=to;closeM[1]=tc;openM[2]=lo;closeM[2]=lc;openM[3]=no;closeM[3]=nc;
-   string names[4]={"SYDNEY","TOKYO","LONDON","NEW YORK"};
+   string names[4]={"SYD","TOK","LDN","NY"};   // 3-letter codes = wider timeline bars
    bool enab[4];
    enab[0]=(InpTradeAllFourSessions||InpTradeSydney);enab[1]=(InpTradeAllFourSessions||InpTradeTokyo);
    enab[2]=(InpTradeAllFourSessions||InpTradeLondon);enab[3]=(InpTradeAllFourSessions||InpTradeNewYork);
