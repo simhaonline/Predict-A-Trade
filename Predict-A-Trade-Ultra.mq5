@@ -2749,7 +2749,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
    double disp=CandleDisplacementATR();if(disp>InpMaxChaseCandleATR){why="anti-chase displacement";return false;}double cc=iClose(eaSymbol,PERIOD_M1,1);if(g_vwap>0&&g_atr>0&&MathAbs(cc-g_vwap)/g_atr>InpMaxEntryVWAPDeviationATR){why="anti-chase VWAP distance";return false;}
    if(InpFilterMode==FILTER_ALL_REQUIRED&&g_score<g_scoreMax){why="filters";return false;}
-   g_score+=SR_DirectionalVote(dir);   // [SR] complex-mode vote: -1..+1, can never satisfy MinFilterScore alone
+   g_score+=SR_DirectionalVote(dir,(dir>0?Ask():Bid()),g_atr);   // [SR] complex-mode vote: -1..+1, can never satisfy MinFilterScore alone
    if(InpFilterMode==FILTER_SCORING&&g_score<InpMinFilterScore){why="score";return false;}
    if(MathAbs(g_dirBias)<InpMinDirBias){why="weak directional bias";return false;}if((dir>0&&g_dirBias<0)||(dir<0&&g_dirBias>0)){why="bias conflict";return false;}
    if(InpUseSMC&&((dir>0?g_smcScoreBull:g_smcScoreBear)<InpMinSMCConfluence)){why="SMC confluence";return false;}
@@ -3005,7 +3005,7 @@ void TryArm()
    }
    else BuildThreeTargets(dir,pending,lots,w,hv,t1,t2,t3);
    // [SR] entry gate before order dispatch for the complex branch as well
-   {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){why=srWhy2;return false;}}
+   {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){g_gateReason=srWhy2;return;}}   // TryArm is void
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
    if(!InpSimpleScalpMode){
    if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";return;}
@@ -3041,13 +3041,13 @@ void TryArm()
          {
             if(InpSimpleScalpMode)   // the armed scalp plan IS the order plan: t1/t3 travel with the trade
             {
-               if(MarketOrder(dir,li,sl,t3,c,cmt,fill,tk))
+               if(MarketOrder(dir,li,sl,t3,cmt,fill,tk))
                {g_armTp1=t1;g_armTp2=t2;g_armTp3=t3;g_armValid=true;placed++;}
             }
             else
             {
                double osl;ScalpStopDistance(dir,entry0,osl);
-               if(MarketOrder(dir,li,osl,c,cmt,fill,tk))placed++;
+               if(MarketOrder(dir,li,osl,c,cmt,fill,tk))placed++;   // complex mode: armed ladder TP3 rides as broker TP (original behavior)
             }
          }
       }
