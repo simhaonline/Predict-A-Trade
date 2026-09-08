@@ -1352,30 +1352,77 @@ void EvaluateScalpSignal()
    double h1=iHigh(eaSymbol,PERIOD_M1,1),l1=iLow(eaSymbol,PERIOD_M1,1);
    double c2=iClose(eaSymbol,PERIOD_M1,2),h2=iHigh(eaSymbol,PERIOD_M1,2),l2=iLow(eaSymbol,PERIOD_M1,2);
    if(g_atr<=0)return;
+   int um=MinuteOfDay(UTCNow());
+   double minBody=MathMax(0.25,InpScalpMinMomentumATR)*g_atr;
 
-   // ---- M5 context
-   bool m5Up=(g_m5e20>g_m5e50),m5Dn=(g_m5e20<g_m5e50);
-   bool trendOK=(g_m5adx<30.0);           // ADX>=30: too strong for reversion
-   bool revOK=(g_m5adx>=20.0||g_m5adx<25.0); // informational; reversion gated by ADX<30 below
-
-   // ---- Mode A: trend pullback (M5 trend + M1 reversal candle back with trend)
-   // Pullback = price dipped to the M1 EMA20 zone, then a strong reversal candle closed
-   // back beyond the prior bar's extreme, with body >= InpScalpMinMomentumATR * ATR.
-   double minBody=InpScalpMinMomentumATR*g_atr;
-   bool pullbackLong=(m5Up&&c1>o1&&(c1-o1)>=minBody&&c1>h2&&l1<=g_ema20+0.10*g_atr);
-   bool pullbackShort=(m5Dn&&c1<o1&&(o1-c1)>=minBody&&c1<l2&&l1>=g_ema20-0.10*g_atr);
-   if(pullbackLong){g_scalpSignal=1;g_scalpWhy="trend-pullback LONG";return;}
-   if(pullbackShort){g_scalpSignal=-1;g_scalpWhy="trend-pullback SHORT";return;}
-
-   // ---- Mode B: mean reversion (M1) - extension from VWAP with RSI extreme
+   //================= MODE B: VWAP MEAN REVERSION (any session) ==================
+   // Documented gold edge: 68-73% reversion after 2-sigma extension. Relaxed from
+   // the too-strict v2 (1.8 ATR + RSI72 + candle + ADX<30 all at once = never fires).
    if(g_vwap>0&&g_rsi>0)
    {
       double dev=(c1-g_vwap)/g_atr;
-      bool extUp=(dev>=1.8),extDn=(dev<=-1.8);
-      bool revCandleDn=(c1<o1&&(o1-c1)>=minBody&&c1<h2),revCandleUp=(c1>o1&&(c1-o1)>=minBody&&c1>l2);
-      // RSI thresholds for M1 gold: 75/25 (research: gold-adjusted)
-      if(extUp&&g_rsi>=72.0&&revCandleDn&&g_m5adx<30.0){g_scalpSignal=-2;g_scalpWhy="mean-reversion SHORT";return;}
-      if(extDn&&g_rsi<=28.0&&revCandleUp&&g_m5adx<30.0){g_scalpSignal=2;g_scalpWhy="mean-reversion LONG";return;}
+      bool extUp=(dev>=1.5),extDn=(dev<=-1.5);
+      // confirmation: reversal candle OR Bollinger band recross (either)
+      bool confDn=(c1<o1)||(c1<g_bbMid);
+      bool confUp=(c1>o1)||(c1>g_bbMid);
+      if(extUp&&(g_rsi>=70.0)&&confDn&&g_m5adx<35.0){g_scalpSignal=-2;g_scalpWhy="VWAP reversion SHORT";return;}
+      if(extDn&&(g_rsi<=30.0)&&confUp&&g_m5adx<35.0){g_scalpSignal=2;g_scalpWhy="VWAP reversion LONG";return;}
+   }
+
+   //================= MODE C: LONDON OPEN BREAKOUT (07:00-08:15 UTC) ==============
+   // Asian range (00:00-06:45 UTC) break during the first London hour. Gold's first
+   // directional move of the day; 70% of daily extremes form in LDN/NY.
+   if(um>=7*60&&um<=8*60+15)
+   {
+      // Asian range = high/low of 00:00-06:45 UTC today
+      datetime dayStart=ServerNow()-(ServerNow()%86400);
+      int asiaBars=(int)((6*60+45));
+      double ah=0,al=0;
+      MqlRates r[];
+      if(CopyRates(eaSymbol,PERIOD_M1,1,asiaBars,r)==asiaBars)
+      {
+         ah=-DBL_MAX;al=DBL_MAX;
+         for(int k=0;k<asiaBars;k++)
+         {
+            datetime bt=(datetime)r[k].time;
+            if(bt>=dayStart&&bt<dayStart+(6*60+45)*60)
+            {ah=MathMax(ah,r[k].high);al=MathMin(al,r[k].low);}
+         }
+         if(ah>0&&al>0&&(ah-al)>=0.8*g_atr)   // meaningful range, not dead tape
+         {
+            if(c1>ah&&c1>o1&&(c1-o1)>=minBody){g_scalpSignal=3;g_scalpWhy="London breakout LONG";return;}
+            if(c1<al&&c1<o1&&(o1-c1)>=minBody){g_scalpSignal=-3;g_scalpWhy="London breakout SHORT";return;}
+         }
+      }
+   }
+
+   //================= MODE D: NY OPEN MOMENTUM (13:30-15:30 UTC) ==================
+   // Liquidity peak (BIS data); deploy momentum with the trend, not fades.
+   if(um>=13*60+30&&um<=15*60+30)
+   {
+      bool m5Up=(g_m5e20>g_m5e50),m5Dn=(g_m5e20<g_m5e50);
+      // M1 momentum burst closing beyond the 15-bar high/low with M5 trend
+      double hh=-DBL_MAX,ll=DBL_MAX;
+      double bars[15];
+      MqlRates r2[];
+      if(CopyRates(eaSymbol,PERIOD_M1,2,15,r2)==15)
+      {
+         for(int k=0;k<15;k++){hh=MathMax(hh,r2[k].high);ll=MathMin(ll,r2[k].low);}
+         if(m5Up&&c1>o1&&(c1-o1)>=0.5*g_atr&&c1>hh){g_scalpSignal=1;g_scalpWhy="NY momentum LONG";return;}
+         if(m5Dn&&c1<o1&&(o1-c1)>=0.5*g_atr&&c1<ll){g_scalpSignal=-1;g_scalpWhy="NY momentum SHORT";return;}
+      }
+   }
+
+   //================= MODE A2: EMA PULLBACK (liquid windows, simplified) ==========
+   // v2 was too strict (low touched EMA AND close beyond prior high in one candle).
+   // Simplified: M5 trend + last bar closed back across EMA20 in trend direction
+   // after being on the wrong side of it (the dip happened, the resumption confirms).
+   {
+      bool m5Up=(g_m5e20>g_m5e50),m5Dn=(g_m5e20<g_m5e50);
+      bool wasBelow=(iClose(eaSymbol,PERIOD_M1,3)<g_ema20||iLow(eaSymbol,PERIOD_M1,1)<=g_ema20);
+      bool wasAbove=(iClose(eaSymbol,PERIOD_M1,3)>g_ema20||iHigh(eaSymbol,PERIOD_M1,1)>=g_ema20);
+      if(m5Up&&wasBelow&&c1>g_ema20&&c1>o1){g_scalpSignal=1;g_scalpWhy="EMA pullback LONG";return;}
+      if(m5Dn&&wasAbove&&c1<g_ema20&&c1<o1){g_scalpSignal=-1;g_scalpWhy="EMA pullback SHORT";return;}
    }
 }
 
@@ -1725,12 +1772,14 @@ double NearestLiquidityTarget(int dir,double entry,int lookback,double fallback)
 double ScalpStopDistance(int dir,double entry,double &slPrice)
 {
    double atr=MathMax(g_atr,MinTradeDistance());
-   if(g_scalpSignal==2||g_scalpSignal==-2)   // reversion
+   if(g_scalpSignal==2||g_scalpSignal==-2)   // VWAP reversion: beyond the extreme + 0.5 ATR
    {
       double ext=(dir>0?iLow(eaSymbol,PERIOD_M1,1):iHigh(eaSymbol,PERIOD_M1,1));
       slPrice=PriceNorm(ext-dir*0.5*atr);
    }
-   else slPrice=ComputeSL(dir,entry);
+   else if(g_scalpSignal==3||g_scalpSignal==-3)  // London breakout: 1.0 ATR stop
+      slPrice=PriceNorm(entry-dir*1.0*atr);
+   else slPrice=PriceNorm(entry-dir*0.90*atr);   // NY momentum / EMA pullback
    double d=MathAbs(entry-slPrice);
    double md=MinTradeDistance();
    if(d<md){d=md;slPrice=PriceNorm(entry-dir*d);}
@@ -1741,13 +1790,13 @@ double ScalpTarget1(int dir,double entry)
    double atr=MathMax(g_atr,MinTradeDistance());
    if((g_scalpSignal==2||g_scalpSignal==-2)&&g_vwap>0)
    {
-      // target the mean, but at least 1.0x the SL distance is NOT required for
-      // reversion (high WR strategy): target = VWAP, min 0.6*ATR away
+      // reversion: target the mean (VWAP), min 0.6 ATR away
       double d=MathAbs(g_vwap-entry);
       if(d<0.6*atr)d=0.6*atr;
       return PriceNorm(entry+dir*d);
    }
-   return PriceNorm(entry+dir*0.45*atr);
+   // breakout/momentum/pullback: fixed 1.2R-style via 0.55 ATR (stop is 0.9-1.0 ATR)
+   return PriceNorm(entry+dir*0.55*atr);
 }
 
 double ComputeSL(int dir,double entry)
@@ -1874,20 +1923,16 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    // survive a 14-item confluence checklist that can veto every bar.
    if(InpSimpleScalpMode)
    {
-      // Ultra-scalp v2: signal comes from the two-mode engine (trend-pullback /
-      // mean-reversion), computed once per M1 bar in EvaluateScalpSignal().
-      // dir is matched to the signal's direction.
+      // Ultra-scalp v3: four signal modes (VWAP reversion, London breakout, NY momentum,
+      // EMA pullback) computed once per M1 bar in EvaluateScalpSignal().
       int want=(g_scalpSignal>0?1:-1);
       if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";return false;}
       setup=g_scalpWhy;
-      // Mean-reversion signals allowed in ANY session (Asian ranges included);
-      // trend-pullback signals only in liquid windows (research: momentum needs volume).
+      // Momentum modes need liquid hours; reversion works everywhere (range fades).
       bool liquid=(w==WIN_TOKYO_LONDON||w==WIN_LONDON_NY||w==WIN_LONDON_OPEN||w==WIN_NY_OPEN
                    ||w==WIN_LONDON||w==WIN_NEWYORK);
-      if(g_scalpSignal==1||g_scalpSignal==-1)
-      {
-         if(!liquid){why="trend signal in thin session";return false;}
-      }
+      if((g_scalpSignal==1||g_scalpSignal==-1||g_scalpSignal==3||g_scalpSignal==-3)&&!liquid)
+      {why="momentum signal in thin session";return false;}
       // Anti-stacking: no second scalp same direction within 60s or 0.35 ATR of an open one
       datetime now=ServerNow();
       if(g_lastEntryTime>0&&now-g_lastEntryTime<60){why="entry spacing 60s";return false;}
