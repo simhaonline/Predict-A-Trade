@@ -233,7 +233,7 @@ input int    InpDisorderCooldownMinutes   = 5;
 
 input group "=== FMP MACRO / NEWS (OBFUSCATED CREDENTIALS) ==="
 input bool   InpUseFMP                    = true;      // FMP stable REST macro adapter (primary intermarket source)
-input int    InpFMPRefreshSec             = 90;        // quote refresh throttle (rate-limit friendly)
+input int    InpFMPRefreshSec             = 600;        // quote refresh throttle (rate-limit friendly)
 input int    InpFMPTimeoutMs              = 5000;      // per-request HTTP timeout
 input double InpFMPUSDPairMinPct          = 0.020;     // min averaged USD-basket move % for a directional vote
 input bool   InpFMPIncludeSPX             = true;      // S&P 500 risk sentiment vote (risk-off = gold bid)
@@ -410,6 +410,10 @@ bool   g_spxAvailable=false;
 bool   g_fmpEverOK=false;
 int    g_fmpErrCount=0;
 bool     g_webRequestWarned=false;
+int      g_fmp429Count=0;
+int      g_fmpCycle=0;
+bool     g_usdGotSPX=false;
+double   g_spxBatchChg=0;
 string g_fmpLastErr="";
 datetime g_fmpLastTry=0,g_fmpLastOK=0;
 int    g_fmpNewsCount=0;
@@ -967,6 +971,46 @@ bool JsonNumber(const string text,const string key,double &value)
 }
 
 //--- one FMP quote; returns the day change % and whether price data arrived
+// Batch quote: FMP /stable/quote accepts comma-separated symbols in ONE request -
+// critical for free-plan rate limits (429 = quota exhausted).
+bool FMPQuoteBatch(string &syms[],double &chg[],int count)
+{
+   if(MQLInfoInteger(MQL_TESTER))return false;
+   string list="";
+   for(int i=0;i<count;i++){list+=(i>0?",":"")+syms[i];}
+   string url=FMPBase()+"/quote?symbol="+list+"&apikey="+FMPKey();
+   string body;
+   if(HttpGet(url,InpFMPTimeoutMs,body)<=0)return false;
+   if(StringFind(body,"Error Message")>=0||StringFind(body,"Restricted Endpoint")>=0||StringFind(body,"Premium Query")>=0)
+   { g_fmpLastErr="batch plan-restricted"; return false; }
+   // Response: array of objects {"symbol":"EURUSD",...,"changePercentage":0.5,...}
+   // For each requested symbol, locate its object and parse changePercentage.
+   for(int i=0;i<count;i++)
+   {
+      chg[i]=0;
+      int si=StringFind(body,"\"symbol\":\""+syms[i]+"\"");
+      if(si<0)continue;
+      int cp=StringFind(body,"changePercentage",si);
+      if(cp<0)continue;
+      int p=cp+StringLen("changePercentage");
+      while(p<StringLen(body))
+      {
+         ushort c=StringGetCharacter(body,p);
+         if(c==' '||c==':'||c=='\t'){p++;continue;}
+         break;
+      }
+      string num="";
+      while(p<StringLen(body))
+      {
+         ushort c=StringGetCharacter(body,p);
+         if((c>='0'&&c<='9')||c=='-'||c=='+'||c=='.'||c=='e'||c=='E'){num+=CharToString((uchar)c);p++;}
+         else break;
+      }
+      chg[i]=StringToDouble(num);
+   }
+   return true;
+}
+
 bool FMPQuote(string sym,double &chgPct,double &price)
 {
    chgPct=0;price=0;
@@ -1029,16 +1073,27 @@ void RefreshFMPMacro(bool force=false)
       return;
    }
    datetime now=ServerNow();
-   if(!force && g_fmpLastTry>0 && now-g_fmpLastTry<InpFMPRefreshSec)return;
+   // Rate-limit defense (HTTP 429): base cycle 600s, doubled on 429 up to 3600s.
+   int effSec=InpFMPRefreshSec*60;
+   if(g_fmp429Count>0)effSec=(int)MathMin(3600,MathPow(2,MathMin(6,g_fmp429Count))*60);
+   if(!force && g_fmpLastTry>0 && now-g_fmpLastTry<effSec)return;
    g_fmpLastTry=now;
+   bool doNews=(g_fmpCycle%2==0);   // news every 2nd cycle: halves request count
 
-   int okCount=0;
-   for(int i=0;i<FMPUSD_COUNT;i++)
+   // ONE batch request for the whole USD basket (+SPX) - free-plan friendly.
+   string syms[FMPUSD_COUNT+1];
+   for(int i=0;i<FMPUSD_COUNT;i++)syms[i]=g_usdPairs[i];
+   int batchN=FMPUSD_COUNT;
+   if(InpFMPIncludeSPX){syms[FMPUSD_COUNT]="^GSPC";batchN=FMPUSD_COUNT+1;}
+   double chg[FMPUSD_COUNT+1];
+   bool batchOK=FMPQuoteBatch(syms,chg,batchN);
+   if(batchOK)
    {
-      double chg=0,px=0;
-      g_usdGot[i]=FMPQuote(g_usdPairs[i],chg,px);
-      if(g_usdGot[i]){ g_usdMove[i]=chg; okCount++; }
+      for(int i=0;i<FMPUSD_COUNT;i++){g_usdGot[i]=true;g_usdMove[i]=chg[i];}
+      if(InpFMPIncludeSPX){g_usdGotSPX=true;g_spxBatchChg=chg[FMPUSD_COUNT];}
    }
+   int okCount=0;
+   for(int i=0;i<FMPUSD_COUNT;i++)if(g_usdGot[i])okCount++;
    g_usdAvailable=(okCount>=(FMPUSD_COUNT-2));       // tolerate up to 2 dead pairs
    if(!g_usdAvailable && g_fmpEverOK==false && g_fmpErrCount==1)
       Print("FMP feed unavailable: ",g_fmpLastErr," | check Tools>Options>Expert Advisors>Allow WebRequest for https://financialmodelingprep.com");
@@ -1055,11 +1110,12 @@ void RefreshFMPMacro(bool force=false)
       }
       if(n>0)g_usdAvg=sum/n;
       g_usdBias=(g_usdAvg<=-InpFMPUSDPairMinPct?1:(g_usdAvg>=InpFMPUSDPairMinPct?-1:0));
-      g_fmpEverOK=true;g_fmpLastOK=now;g_fmpErrCount=0;
+      g_fmpEverOK=true;g_fmpLastOK=now;g_fmpErrCount=0;g_fmp429Count=0;g_fmpCycle++;
    }
    else
    {
       g_fmpErrCount++;
+      if(StringFind(g_fmpLastErr,"429")>=0||StringFind(g_fmpLastErr,"err 0")>=0)g_fmp429Count++;
       // Keep the last-good basket values (stale) for 10 minutes so one failed poll
       // doesn't flip the macro gate; after that, fall back to broker EURUSD momentum.
       bool stale=(g_fmpLastOK>0 && now-g_fmpLastOK<600);
@@ -1075,21 +1131,21 @@ void RefreshFMPMacro(bool force=false)
       }
    }
 
-   if(InpFMPIncludeSPX)
+   if(InpFMPIncludeSPX&&batchOK)
    {
-      double chg=0,px=0;
-      g_spxAvailable=FMPQuote("^GSPC",chg,px);
+      // SPX rides the SAME batch request (appended symbol) - zero extra requests.
+      g_spxAvailable=g_usdGotSPX;
       if(g_spxAvailable)
       {
-         g_spxMovePct=chg;
+         g_spxMovePct=g_spxBatchChg;
          // Risk-off (SPX down) favours gold bids; risk-on (SPX up) leans bearish gold.
          g_spxBias=(g_spxMovePct<=-InpFMPSPXMinPct?1:(g_spxMovePct>=InpFMPSPXMinPct?-1:0));
       }
       else g_spxBias=0;
    }
-   else{ g_spxAvailable=false;g_spxBias=0; }
+   else if(!batchOK){ g_spxAvailable=false;g_spxBias=0; }
 
-   FMPNewsScan();
+   if(doNews)FMPNewsScan();
 
    g_macroBull=(g_usdBias>0?1:0)+(g_spxBias>0?1:0)+(g_eurBias>0?1:0);
    g_macroBear=(g_usdBias<0?1:0)+(g_spxBias<0?1:0)+(g_eurBias<0?1:0);
