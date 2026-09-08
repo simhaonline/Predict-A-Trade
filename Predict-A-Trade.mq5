@@ -446,6 +446,11 @@ PositionState g_ps[];
 long g_serverOffsetSec=0;
 double g_ptScale=1.0;                    // point-unit auto-scale for 3-digit gold feeds
 datetime g_lastOffsetRefresh=0,g_lastBar=0,g_lastExitTime=0,g_lastEntryTime=0;
+// Simple-mode armed plan snapshot: TryArm() computes the scalp ladder (t1/t2/t3) before
+// the market order fills; OnTradeTransaction later reconstructs position state from the
+// deal. These carry the ARMED plan into AddPositionState so the broker TP and the managed
+// micro-TP ladder are the same distances the entry was cost-validated against.
+double g_armTp1=0,g_armTp2=0,g_armTp3=0;bool g_armValid=false;
 datetime g_newsChecked=0,g_nextNewsTime=0,g_newsBlockedUntil=0,g_disorderUntil=0;
 string g_nextNewsName="",g_gateReason="";
 bool g_newsBlocked=false,g_paused=false;
@@ -1772,14 +1777,14 @@ double NearestLiquidityTarget(int dir,double entry,int lookback,double fallback)
 double ScalpStopDistance(int dir,double entry,double &slPrice)
 {
    double atr=MathMax(g_atr,MinTradeDistance());
-   if(g_scalpSignal==2||g_scalpSignal==-2)   // VWAP reversion: beyond the extreme + 0.5 ATR
+   if(g_scalpSignal==2||g_scalpSignal==-2)   // VWAP reversion: beyond the extreme + 0.45 ATR
    {
       double ext=(dir>0?iLow(eaSymbol,PERIOD_M1,1):iHigh(eaSymbol,PERIOD_M1,1));
-      slPrice=PriceNorm(ext-dir*0.5*atr);
+      slPrice=PriceNorm(ext-dir*0.45*atr);
    }
-   else if(g_scalpSignal==3||g_scalpSignal==-3)  // London breakout: 1.0 ATR stop
-      slPrice=PriceNorm(entry-dir*1.0*atr);
-   else slPrice=PriceNorm(entry-dir*0.90*atr);   // NY momentum / EMA pullback
+   else if(g_scalpSignal==3||g_scalpSignal==-3)  // London breakout: 0.85 ATR stop
+      slPrice=PriceNorm(entry-dir*0.85*atr);
+   else slPrice=PriceNorm(entry-dir*0.80*atr);   // NY momentum / EMA pullback
    double d=MathAbs(entry-slPrice);
    double md=MinTradeDistance();
    if(d<md){d=md;slPrice=PriceNorm(entry-dir*d);}
@@ -1795,8 +1800,8 @@ double ScalpTarget1(int dir,double entry)
       if(d<0.6*atr)d=0.6*atr;
       return PriceNorm(entry+dir*d);
    }
-   // breakout/momentum/pullback: fixed 1.2R-style via 0.55 ATR (stop is 0.9-1.0 ATR)
-   return PriceNorm(entry+dir*0.55*atr);
+   // breakout/momentum/pullback: fixed ~2R-style via 0.40 ATR (stop is 0.80-0.85 ATR)
+   return PriceNorm(entry+dir*0.40*atr);
 }
 
 double ComputeSL(int dir,double entry)
@@ -2122,6 +2127,21 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
       g_ps[idx]=s;
       return;                          // broker TP/SL stand as sent - no rewrite
    }
+   // Simple scalp mode: manage against the ARMED scalp plan (t1/t2/t3 computed in
+   // TryArm before the fill), not the complex-engine ATR ladder - the entry was
+   // cost-validated against exactly this plan. Full exit at TP1 (micro-scalp);
+   // broker TP/SL are overwritten to the armed t3/SL so the plan survives restarts.
+   if(InpSimpleScalpMode&&g_armValid)
+   {
+      s.tp1=g_armTp1;s.tp2=g_armTp2;s.tp3=g_armTp3;
+      s.volTP1=lots;s.volTP2=0;s.volTP3=0;   // bank everything at TP1 (broker-min runner may trail to t3)
+      s.tp1Done=false;s.tp2Done=true;s.tp3Done=false;
+      g_ps[idx]=s;
+      ModifyPositionSafe(ticket,sl,s.tp3);
+      g_armValid=false;                       // snapshot consumed by this fill
+      return;
+   }
+   if(InpSimpleScalpMode)g_armValid=false;    // stale snapshot (restart gap): fall back to complex ladder
    // Use the HV regime carried by the pending order so the executed plan matches the armed plan.
    BuildThreeTargets(dir,entry,lots,w,hv,s.tp1,s.tp2,s.tp3);
    if(InpUseThreeTargets&&InpAB_EnableThreeTP)AllocateVolumes(lots,s.volTP1,s.volTP2,s.volTP3);
@@ -2169,8 +2189,9 @@ void TryArm()
    {
       t1=ScalpTarget1(dir,entry0);
       // single-target scalp: TP2/TP3 trail beyond for the runner
+      // (0.40 total / 0.75 total / 1.15 total ATR - authoritative profile)
       double atr2=MathMax(g_atr,MinTradeDistance());
-      t2=PriceNorm(t1+dir*0.40*atr2);t3=PriceNorm(t1+dir*0.85*atr2);
+      t2=PriceNorm(entry0+dir*0.75*atr2);t3=PriceNorm(entry0+dir*1.15*atr2);
    }
    else BuildThreeTargets(dir,pending,lots,w,hv,t1,t2,t3);
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
@@ -2198,8 +2219,16 @@ void TryArm()
       {
          double fill=0;
          {
-            double osl;ScalpStopDistance(dir,entry0,osl);
-            if(MarketOrder(dir,li,osl,c,cmt,fill,tk))placed++;
+            if(InpSimpleScalpMode)   // the armed scalp plan IS the order plan: t1/t3 travel with the trade
+            {
+               if(MarketOrder(dir,li,sl,t3,c,cmt,fill,tk))
+               {g_armTp1=t1;g_armTp2=t2;g_armTp3=t3;g_armValid=true;placed++;}
+            }
+            else
+            {
+               double osl;ScalpStopDistance(dir,entry0,osl);
+               if(MarketOrder(dir,li,osl,c,cmt,fill,tk))placed++;
+            }
          }
       }
       else if(PlaceStop(dir,li,p,lsl,c,cmt,tk))placed++;
