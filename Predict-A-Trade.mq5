@@ -56,7 +56,7 @@ enum ENUM_WINDOW_ID
 //====================================================================
 input group "=== ULTRA-SCALP MODE (SIMPLIFIED ENGINE) ==="
 input bool   InpSimpleScalpMode           = true;      // TRUE = simple M1 scalp engine (recommended); false = full multi-filter engine
-input int    InpScalpMinScore             = 2;         // simple engine: min directional votes (of 5) - low = trades often
+input int    InpScalpMinScore             = 4;      // 4/5 = strong alignment (2/5 gave 25% WR)         // simple engine: min directional votes (of 5) - low = trades often
 input double InpScalpMinMomentumATR       = 0.08;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
 
 input group "=== CAPITAL PROTECTION ==="
@@ -1503,6 +1503,14 @@ void UpdateRiskPeriods()
    datetime n=ServerNow();int dk=DayKey(n),wk=WeekKey(n),mk=MonthKey(n);double eq=AccountInfoDouble(ACCOUNT_EQUITY);
    if(g_dayKey!=dk){g_dayKey=dk;g_dayAnchor=eq;g_tradesToday=0;g_consecutiveLosses=0;g_recoveryLegs=0;g_stopDay=false;ResetWindowDay();}
    if(g_weekKey!=wk){g_weekKey=wk;g_weekAnchor=eq;g_stopWeek=false;}
+   // Stale-anchor guard: a persisted anchor from an older week can show absurd weekly
+   // DD (e.g. 93%) after deposits/withdrawals or state carry-over. Re-anchor when the
+   // number is not physically plausible for one week of trading.
+   if(g_weekAnchor>0)
+   {
+      double wdd=(g_weekAnchor-eq)/g_weekAnchor*100.0;
+      if(wdd>60.0||wdd<-60.0)g_weekAnchor=eq;
+   }
    if(g_monthKey!=mk){g_monthKey=mk;g_monthAnchor=eq;g_stopMonth=false;}
    double d=(g_dayAnchor>0?(g_dayAnchor-eq)/g_dayAnchor*100:0),w=(g_weekAnchor>0?(g_weekAnchor-eq)/g_weekAnchor*100:0),m=(g_monthAnchor>0?(g_monthAnchor-eq)/g_monthAnchor*100:0);
    g_maxDDSeen=MathMax(g_maxDDSeen,MathMax(0,d));if(d>=InpDailyLossPercent||d>=InpMaxFloatingDDPercent)g_stopDay=true;if(w>=InpWeeklyLossLimit)g_stopWeek=true;if(m>=InpMonthlyLossLimit)g_stopMonth=true;
@@ -1786,6 +1794,11 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       int ss=ScalpScore(dir);
       if(ss<InpScalpMinScore){why="scalp votes "+IntegerToString(ss)+"/5";return false;}
       if(!LiveMomentumConfirm(dir)){why="price vs EMA20";return false;}
+      // Liquidity gate: solo Sydney / pre-dawn Tokyo hours produced 19 of 24 losses
+      // (thin book, noise momentum). Scalps only where sessions overlap or LDN/NY live.
+      bool liquid=(w==WIN_TOKYO_LONDON||w==WIN_LONDON_NY||w==WIN_LONDON_OPEN||w==WIN_NY_OPEN
+                   ||w==WIN_LONDON||w==WIN_NEWYORK);
+      if(!liquid){why="thin session (SYD/TOK solo)";return false;}
       // Higher-timeframe agreement: M1 scalps counter to the H1 trend are the exact
       // pattern that produced the screenshot's stacked losing buys.
       bool htfUp=(g_m15e20>g_m15e50);
