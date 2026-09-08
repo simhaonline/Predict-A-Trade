@@ -1535,7 +1535,8 @@ int CountOwnPendings()
 
 double CurrentRiskPct(ENUM_WINDOW_ID w,bool hv)
 {
-   double r=(InpSimpleScalpMode?0.35:InpRiskPercent);   // scalp base risk: bounded, smalldouble dd=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
+   double r=(InpSimpleScalpMode?0.35:InpRiskPercent);   // scalp base risk: bounded, small
+   double dd=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
    if(dd>InpMaxFloatingDDPercent*0.5)r=MathMax(0.10,r-InpRiskStepDownOnDD);
    r*=WindowRiskMultiplier(w);if(hv)r*=InpHVExtraSignalRiskMult;return r;
 }
@@ -2028,7 +2029,7 @@ void TryRecovery()
    if(lots<=0 && InpAllowMinLotFallback)
    {
       double minRisk=PriceMoveMoney(slDist,broker.volumeMin)+ExpectedAllInCost(broker.volumeMin);
-      if(bal>0 && minRisk/bal*100.0<=InpMinLotMaxRiskPct) fv=FloorVolume(broker.volumeMin);
+      if(bal>0 && minRisk/bal*100.0<=InpMinLotMaxRiskPct) lots=FloorVolume(broker.volumeMin);
    }
    if(lots<=0)return;
    if(InpMaxTotalLots>0&&SumOwnLots()+lots>InpMaxTotalLots)lots=FloorVolume(InpMaxTotalLots-SumOwnLots());
