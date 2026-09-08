@@ -1,6 +1,11 @@
 # XAUUSD M1 UltraScalp — Code Audit
 
-**EA:** Predict-A-Trade.mq5 · **Profile:** prompt.md "FINAL AUTHORITATIVE VALUES" (2026-09-08) · **Static check:** ALL GREEN (balance, 215/215 inputs referenced, no forbidden identifiers)
+**EA:** Predict-A-Trade.mq5 · **Profile:** prompt.md "FINAL AUTHORITATIVE VALUES" (2026-09-08) · **Static check:** ALL GREEN (balance, 293/293 inputs referenced after the SR module, no forbidden identifiers)
+
+> **Scope note (cross-check revision):** the committed prompt.md carries TWO missions.
+> Mission 1 = this ultra-scalp profile audit. Mission 2 = the SR Zones module, documented
+> in `docs/SR_Zones_Module.md` with its own §below. This file covers both, plus the
+> corrections found while cross-checking the first draft (marked ⚠ CORRECTION).
 
 ---
 
@@ -8,11 +13,28 @@
 
 | Deliverable | Status |
 |---|---|
-| `presets/XAUUSD_M1_UltraScalp.set` | 215 rows, one per source input; enum values serialized as integers (BREAKER_CLOSE_ALL=1, EXEC_DIRECTIONAL=1, FILTER_SCORING=0, HV_AUTO=1, VWAP_BROKER_DAY=0, PERIOD_M5=5) |
+| `presets/XAUUSD_M1_UltraScalp.set` | 293 rows (215 ultra-scalp + 78 SR inputs); enum values serialized as integers (BREAKER_CLOSE_ALL=1, EXEC_DIRECTIONAL=1, FILTER_SCORING=0, HV_AUTO=1, VWAP_BROKER_DAY=0, PERIOD_M5=5, SR_SOFT_FILTER=1) |
+| `presets/XAUUSD_M1_UltraScalp_SR_Off.set` | identical, `InpUseSRZones=false` — A/B baseline (SR-off must trade bit-identically to the pre-SR build) |
 | `docs/XAUUSD_M1_UltraScalp_Audit.md` | this file |
+| `docs/SR_Zones_Module.md` | SR module architecture, input reference, scoring worked example |
 | Minimal source diff | applied — simple-mode TP/SL multipliers only + plan-wiring fix (§5) |
 
-Every input name in the prompt exists in source (215/215, zero missing, zero extras).
+Every input name in the prompt exists in source (293/293 across both missions, zero missing, zero extras).
+
+---
+
+## 1b. Support & Resistance module (prompt.md mission 2) — active features in InpSimpleScalpMode=true
+
+Full architecture, input reference and scoring example: see `docs/SR_Zones_Module.md`. Summary of what is ACTIVE while simple scalp mode runs (with `InpUseSRZones=true`):
+
+- **Zone engine**: M15/H1/H4/D1 pivot swings + prev-day/prev-week/session H/L + daily open + round numbers ($10/$5 steps) + FVG/IFVG/PTB/VWAP confluence, merged into ATR-thickness zones, touch/rejection/break counting on M1 history, recency decay, strongest-first pruning to per-side/total caps.
+- **Entry gate** (both simple and complex branches, after all existing cost/spread/session/news gates): SOFT mode blocks entries into an opposing wall (strength ≥ 5.0) within 0.45 ATR unless a confirmed breakout; HARD mode additionally demands TP1 headroom ×1.10. ADVISORY never blocks. Rejection reasons are machine-parsable (`SR_WALL_5.8@0.31A`, `SR_NO_HEADROOM`) and surface on the panel and the CSV.
+- **TP snap**: scalp legs (and complex ladder, pre-validation) front-run a nearby zone edge by 8 pt when the shift stays within 0.25 ATR; the simple-mode snap is reverted if the leg would fail its net-profit gate (constraint 7).
+- **SL behind zone**: optionally widens the stop behind a qualifying zone (max +0.30 ATR), then RECOMPUTES the lot so risk % is identical (constraint 6); invalid recompute → base stop kept. Never tightens.
+- **TP3 runner trail**: zone-based anchor joins as a candidate; the more conservative of swing-anchor vs zone-anchor wins inside the existing monotonic trail logic.
+- **Display/log**: two panel rows (R_SR1/R_SR2), zone rectangles + labels (throttled, tester-safe, all removed on deinit), CSV telemetry columns, periodic zone-table self-test (`InpSRLogLevels`, every 300 s).
+- **Complex-mode only**: the ±1 directional score vote (bounded so it can never satisfy `InpMinFilterScore` alone); dormant in simple mode except through the shared entry gate.
+- `InpUseSRZones=false` (SR_Off preset): every SR call returns immediately — zero behavioral or CPU cost, bit-identical trading.
 
 ## 2. Hardcoded simple-mode TP/SL — the mandated replacement (APPLIED)
 
@@ -42,13 +64,15 @@ Implied R:R after the change: momentum ~0.50R at TP1, ~0.94R at TP2, ~1.44R at T
 ## 4. Input effectiveness in InpSimpleScalpMode=true
 
 **Effective (read by the simple path, the OnTick loop, management, or protection):**
-`InpSimpleScalpMode` · `InpScalpMinMomentumATR` (signal body floor) · `InpDailyLossPercent` · `InpMaxFloatingDDPercent` (also halves scalp risk ≥ half-limit) · `InpWeeklyLossLimit` · `InpMonthlyLossLimit` · `InpRiskStepDownOnDD` · `InpMaxConsecutiveLosses` (stats/display + halt recount) · `InpMaxTradesPerDay` · `InpAllowMinLotFallback` · `InpMinLotMaxRiskPct` · `InpMaxAggregateOpenRiskPct` · `InpMaxDirectionalRiskPct` · `InpBreakerAction` · `InpNoMartingale` · `InpNoAveragingDown` (sizing freeze) · `InpMaxSpreadPoints` (hard cap, both modes) · `InpMaxSlippagePoints` (order deviation) · `InpCommissionPerLotRTFallback` · `InpExpectedSlipPtsFallback` (cost model) · `InpMaxCostToTP1Pct` · `InpMinNetProfitTP1/2/3Money` (TP1 gate runs in simple mode) · `InpOrderRetry` · `InpExtremeSlippagePoints` (fill-quality cooldown) · `InpMaxConcurrentPositions` · `InpMaxTotalLots` · `InpArmWhileInTrade` · `InpMinSecondsBetweenEntries` (hardcoded 60s spacing also applies; the input governs fresh-structure bars) · `InpMinBarsFreshStructure` · `InpMaxSignalsPerWindow` (counter) · `InpPerWindowRiskBudgetPct` · `InpOncePerValidatedEvent` · `InpCancelStalePendings` · `InpPendingExpiryMinutes` · `InpLotSize` (only if `InpRiskPercent≤0`) · `InpUseSessionFilter` + all `InpTrade*` session/window switches · local open/close minute inputs · `InpLondonOpenWindowMin` · `InpNYOpenWindowMin` · `InpOverlapPadMinutes` · `InpFridayCutoffServer` · `InpAutoDetectServerOffset` · `InpManualServerOffsetHours` (fallback) · `InpServerOffsetRefreshSec` · `InpUseNewsFilter` · `InpNewsBufferMinutes` · `InpNewsLookaheadMin` · `InpPostNewsStabilizeMinutes` · `InpAvoidSwap` · `InpForceFlatBeforeSwap` · `InpSwapRolloverServerHour` · `InpSwapBlockMinutesBefore/After` · `InpMaxTradeMinutes` (time stop, simple mode included) · `InpUseFMP` + FMP refresh/timeout/thresholds (soft influence) · `InpAllowBrokerMacroFallback` · `InpRequireExternalData` · `InpMagicNumber` · `InpComment` · dashboard/log/persist inputs · `InpUseThreeTargets`+`InpAB_EnableThreeTP` (now honored via the armed plan; when disabled the full position runs to broker t3) · `InpUseCostAdjustedBE`+`InpBEExtraLockATR` (TP1 BE lock) · `InpTP3EarlyExit` (disorder early exit) · `InpUseTP3StructureTrail`+`InpTP3TrailATR`+`InpTP3TrailStepATR` (runner trail toward t3) · `InpSLStructureBufferATR` (trail structural bound) · `InpCloseOnExtremeSlippage` · `InpSlippageCooldownMinutes` · `InpEnablePerformanceGating` + `InpPerf*` + `InpWeakWindowRiskMultiplier` (window risk multipliers apply to scalp risk too).
+`InpSimpleScalpMode` · `InpScalpMinMomentumATR` (signal body floor) · `InpDailyLossPercent` · `InpMaxFloatingDDPercent` (also halves scalp risk ≥ half-limit) · `InpWeeklyLossLimit` · `InpMonthlyLossLimit` · `InpRiskStepDownOnDD` · `InpMaxConsecutiveLosses` (stats/display + halt recount) · `InpMaxTradesPerDay` · `InpAllowMinLotFallback` · `InpMinLotMaxRiskPct` · `InpMaxAggregateOpenRiskPct` · `InpMaxDirectionalRiskPct` · `InpBreakerAction` · `InpNoMartingale` · `InpNoAveragingDown` (sizing freeze) · `InpMaxSpreadPoints` (hard cap, both modes) · `InpMaxSlippagePoints` (order deviation) · `InpCommissionPerLotRTFallback` · `InpExpectedSlipPtsFallback` (cost model) · `InpMaxCostToTP1Pct` · `InpMinNetProfitTP1/2/3Money` (TP1 gate runs in simple mode) · `InpOrderRetry` · `InpExtremeSlippagePoints` (fill-quality cooldown) · `InpMaxConcurrentPositions` · `InpMaxTotalLots` · `InpArmWhileInTrade` · `InpPerWindowRiskBudgetPct` (RiskRoom, simple path included) · `InpCancelStalePendings` · `InpPendingExpiryMinutes` · `InpLotSize` (only if `InpRiskPercent≤0`) · `InpUseSessionFilter` + all `InpTrade*` session/window switches · local open/close minute inputs · `InpLondonOpenWindowMin` · `InpNYOpenWindowMin` · `InpOverlapPadMinutes` · `InpFridayCutoffServer` · `InpAutoDetectServerOffset` · `InpManualServerOffsetHours` (fallback) · `InpServerOffsetRefreshSec` · `InpUseNewsFilter` · `InpNewsBufferMinutes` · `InpNewsLookaheadMin` · `InpPostNewsStabilizeMinutes` · `InpAvoidSwap` · `InpForceFlatBeforeSwap` · `InpSwapRolloverServerHour` · `InpSwapBlockMinutesBefore/After` · `InpMaxTradeMinutes` (time stop, simple mode included) · `InpUseFMP` + FMP refresh/timeout/thresholds (soft influence) · `InpAllowBrokerMacroFallback` · `InpRequireExternalData` · `InpMagicNumber` · `InpComment` · dashboard/log/persist inputs · `InpUseThreeTargets`+`InpAB_EnableThreeTP` (now honored via the armed plan; when disabled the full position runs to broker t3) · `InpUseCostAdjustedBE`+`InpBEExtraLockATR` (TP1 BE lock) · `InpTP3EarlyExit` (disorder early exit) · `InpUseTP3StructureTrail`+`InpTP3TrailATR`+`InpTP3TrailStepATR` (runner trail toward t3) · `InpSLStructureBufferATR` (trail structural bound) · `InpCloseOnExtremeSlippage` · `InpSlippageCooldownMinutes` · `InpEnablePerformanceGating` + `InpPerf*` + `InpWeakWindowRiskMultiplier` (window risk multipliers apply to scalp risk too).
 
 **Ignored by design in simple mode** (complex engine only, retained in the .set for completeness; explicit note per prompt):
 - **Recovery engine** — `TryRecovery()` returns immediately when `InpSimpleScalpMode`: **`InpUseRecovery=true` never executes recovery in simple mode** (acceptance criterion met; counter-trend "loss-chasing" legs disabled). `InpRecovery*` values are dormant.
 - **RR validation** — the `RRValid` TP2/TP3 gate is complex-only; `InpMinRR_TP2/TP3` are not consulted (the scalp ladder's own R:R is a consequence of the §2 distances).
 - **TP/SL ATR ladder inputs** — `InpSL_ATR_Multiplier`, `InpSLStructureBufferATR` (SL widening), `InpTP1/2/3_ATR_Floor/Cap` are not read for scalp sizing (only `InpSLStructureBufferATR` bounds the runner trail above).
-- **Multi-filter machinery** — `InpFilterMode`, `InpMinFilterScore`, all `InpUse*` filter switches, `InpMinDirBias`, `InpMinSMCConfluence`, `InpMinAdvancedSMCConfluence`, lookback/coil inputs, indicator-period inputs, `InpMinADX`, `InpMin/MaxATRPoints` (only ATR-min applies via the shared pre-gate), volume/liquidity thresholds, HV qualification (`HVScore` path), `InpSpreadSpikeRatio`, `InpMaxSpreadPercentile`, `InpMaxAverageSlippagePoints`, disorder anti-chase caps, `InpVerifiedBucket*`, macro confluence voting, `InpExecutionMode`/`InpStraddleLayers`/`InpScaleIn`/`InpUseATRForDistance`/`InpATRMultiplier`/`InpDistance`/`InpLayerStepATR`/`InpLayerSpacingATR` (simple mode forces 1 market layer), `InpMinRR_TP2/TP3`, `InpTP*Pct` (superseded by the 100/0/0 split), `InpFMPNewsHardBlock` (news gate itself is shared and active), `InpEURUSD*` details, `InpMacroTF`/`InpMacroMomentumBars` (broker fallback math is shared).
+- **Fresh-setup / anti-overtrading quartet** — `InpOncePerValidatedEvent`, `InpMinSecondsBetweenEntries`, `InpMinBarsFreshStructure`, `InpMaxSignalsPerWindow` are all read inside `FreshSetup()`, which only the complex branch of `CanEnter()` calls (line 1977). The simple path instead enforces hardcoded guards: 60-second same-direction spacing and 0.35 ATR proximity to an open same-direction scalp, plus the shared daily trade cap. Changing these four inputs in simple mode has no effect.
+- **Multi-filter machinery** — `InpFilterMode`, `InpMinFilterScore`, all `InpUse*` filter switches, `InpMinDirBias`, `InpMinSMCConfluence`, `InpMinAdvancedSMCConfluence`, FVG/AMD/IFVG/PTB lookback & threshold inputs, `InpMinADX`, `InpMin/MaxATRPoints` (only ATR-min applies via the shared pre-gate), volume/liquidity thresholds, HV qualification (`HVScore` path), `InpSpreadSpikeRatio`, `InpMaxSpreadPercentile`, `InpMaxAverageSlippagePoints`, disorder anti-chase caps, `InpVerifiedBucket*`, macro confluence voting, `InpExecutionMode`/`InpStraddleLayers`/`InpScaleIn`/`InpUseATRForDistance`/`InpATRMultiplier`/`InpDistance`/`InpLayerStepATR`/`InpLayerSpacingATR` (simple mode forces 1 market layer), `InpMinRR_TP2/TP3`, `InpTP*Pct` (superseded by the 100/0/0 split), `InpFMPNewsHardBlock` (news gate itself is shared and active), `InpEURUSD*` details, `InpMacroTF`/`InpMacroMomentumBars` (broker fallback math is shared).
+- **Indicator-period inputs — partial reach in simple mode (corrects an earlier draft):** `InpATRPeriod` (hATR), `InpRSIPeriod` (hRSI) and `InpEMA20Period` (hEMA20) **are effective**: the buffers they create feed the simple signal — `g_atr` sizes every scalp SL/TP, `g_rsi` is the reversion trigger, `g_ema20` drives the EMA-pullback mode and the t3-runner trail bound. `InpADXPeriod` (hADX) is computed but its buffer `g_adx` is consumed only by complex-mode scoring; the simple reversion gate instead uses the **hardcoded** M5 ADX (`hM5ADX` fixed at 14) with threshold `<35` literal. `InpEMA50Period` (hEMA50) likewise feeds only complex scoring. The M5 trend EMAs (`hM5E20/hM5E50`, periods 20/50 hardcoded) shape simple-mode trend context but have no input to tune. The .set therefore still carries every period input so the file loads losslessly; users tuning `InpADXPeriod`/`InpEMA50Period` in simple mode will see no behavioral change.
 - Note: `Disorder*` inputs are consulted via `IsDisorder()` in shared paths (news/recovery); the dedicated anti-chase entry gates are complex-only.
 
 ## 5. Hardcoded values that still override inputs (flagged, NOT changed)
@@ -71,7 +95,7 @@ Implied R:R after the change: momentum ~0.50R at TP1, ~0.94R at TP2, ~1.44R at T
 
 | Criterion | Status |
 |---|---|
-| .set loads without invalid-input errors | 215 names == 215 source inputs, exact match, enum ints |
+| .set loads without invalid-input errors | 293 names == 293 source inputs (incl. 78 SR), exact match, enum ints |
 | `InpSimpleScalpMode=true` | ✓ (row 1) |
 | `InpNoMartingale=true` / `InpNoAveragingDown=true` | ✓ (enforced in sizing code, not just declared) |
 | `InpScaleIn=false` | ✓ |
@@ -84,5 +108,13 @@ Implied R:R after the change: momentum ~0.50R at TP1, ~0.94R at TP2, ~1.44R at T
 ## 8. Verification
 
 - `brace_check.py`: balanced (braces/parens/brackets).
-- `verify_static.py`: **ALL GREEN** — balance OK, 215/215 inputs referenced ≥2×, no `#include`/CTrade-class identifiers, no credential leaks. (The script's comment-strip used to corrupt on `"https://"` string literals; the tokenizer is now single-pass, fixed in the skill repo — the EA was never at fault.)
-- Not compiled locally (no MetaEditor on Linux): compile in MetaEditor (F7) and paste error.log if anything surfaces. Expected: 0 errors, 0 warnings; only globals `g_armTp1/2/3`, `g_armValid` and the two touched functions changed.
+- `verify_static.py`: **ALL GREEN** — balance OK, 293/293 inputs referenced ≥2×, no `#include`/CTrade-class identifiers, no credential leaks. (The script's comment-strip used to corrupt on `"https://"` string literals; the tokenizer is now single-pass, fixed in the skill repo — the EA was never at fault.)
+- Not compiled locally (no MetaEditor on Linux): compile in MetaEditor (F7) and paste error.log if anything surfaces. Expected: 0 errors; only the SR module block, the marked `// [SR]` integration lines, and the §2 multipliers changed.
+
+---
+
+## ⚠ Corrections from the 2026-09-08 cross-check (supersede earlier draft claims)
+
+1. **"Indicator-period inputs ignored in simple mode" was wrong.** Verified by handle construction: `hATR=iATR(...,InpATRPeriod)`, `hRSI=iRSI(...,InpRSIPeriod)`, `hEMA20=iMA(...,InpEMA20Period)` — and those buffers feed the simple signal (`g_atr` sizes every scalp SL/TP, `g_rsi` is the reversion trigger, `g_ema20` drives the EMA-pullback mode and the runner trail bound). Only `InpADXPeriod` (g_adx → complex scoring only; the simple reversion gate uses the hardcoded M5 ADX 14, threshold <35) and `InpEMA50Period` (g_ema50 → complex scoring only) have no simple-mode effect. See §4 for the corrected list.
+2. **Four inputs listed "Effective" were actually FreshSetup-only** (complex branch): `InpOncePerValidatedEvent`, `InpMinSecondsBetweenEntries`, `InpMinBarsFreshStructure`, `InpMaxSignalsPerWindow` — `FreshSetup()` is called only at the complex gate (line ~1977). The simple path enforces hardcoded spacing (60 s, 0.35 ATR proximity) instead. They now appear in the ignored section.
+3. **Coverage claim**: the first pass verified mission 1 (215 inputs) only; the committed prompt.md contains mission 2 (SR module, +78 inputs). Both are now implemented, verified (293/293 names and values), and documented. The verification scripts were also fixed to read the committed prompt.md (authoritative) rather than a stale working copy.

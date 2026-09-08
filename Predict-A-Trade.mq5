@@ -35,6 +35,20 @@ enum ENUM_EXECUTION_MODE  { EXEC_STRADDLE=0, EXEC_DIRECTIONAL=1, EXEC_AUTO=2 };
 enum ENUM_VWAP_ANCHOR     { VWAP_BROKER_DAY=0, VWAP_LONDON=1, VWAP_NEWYORK=2 };
 enum ENUM_BREAKER_ACTION  { BREAKER_BLOCK_ONLY=0, BREAKER_CLOSE_ALL=1 };
 enum ENUM_HV_MODE         { HV_OFF=0, HV_AUTO=1, HV_FORCE_GATED=2 };
+enum ENUM_SR_MODE         { SR_ADVISORY=0, SR_SOFT_FILTER=1, SR_HARD_FILTER=2 };
+enum ENUM_SR_SRC
+{
+   SRSRC_PIVOT    = 1,
+   SRSRC_PREVDAY  = 2,
+   SRSRC_PREVWEEK = 4,
+   SRSRC_SESSION  = 8,
+   SRSRC_ROUND    = 16,
+   SRSRC_DAILYOPEN= 32,
+   SRSRC_FVG      = 64,
+   SRSRC_IFVG     = 128,
+   SRSRC_PTB      = 256,
+   SRSRC_VWAP     = 512
+};
 enum ENUM_WINDOW_ID
 {
    WIN_NONE=0,
@@ -303,6 +317,723 @@ input string InpSoundResume               = "alert.wav";   // sound when arming 
 input int    InpMagicNumber               = 20260911;
 input string InpComment                   = "Predict-A-Trade v4";
 
+input group "=== SUPPORT & RESISTANCE (HTF ZONES) ==="
+input bool            InpUseSRZones              = true;             // master switch; false = bit-identical legacy build
+input ENUM_SR_MODE    InpSRMode                  = SR_SOFT_FILTER;   // advisory / soft wall filter / hard headroom filter
+input int             InpSRRefreshSeconds        = 15;               // throttled rebuild interval
+input bool            InpSRRebuildOnNewHTFBar    = true;             // also rebuild when any SR timeframe opens a bar
+input ENUM_TIMEFRAMES InpSR_TF1                  = PERIOD_M15;
+input ENUM_TIMEFRAMES InpSR_TF2                  = PERIOD_H1;
+input ENUM_TIMEFRAMES InpSR_TF3                  = PERIOD_H4;
+input ENUM_TIMEFRAMES InpSR_TF4                  = PERIOD_D1;
+input int             InpSR_BarsTF1              = 300;
+input int             InpSR_BarsTF2              = 300;
+input int             InpSR_BarsTF3              = 240;
+input int             InpSR_BarsTF4              = 90;
+input int             InpSRFractalLeft           = 2;
+input int             InpSRFractalRight          = 2;
+input bool            InpSRUsePivotSwings        = true;
+input bool            InpSRUsePrevDayHL          = true;
+input bool            InpSRUsePrevWeekHL         = true;
+input bool            InpSRUseSessionHL          = true;
+input bool            InpSRUseDailyOpen          = true;
+input bool            InpSRUseRoundNumbers       = true;
+input double          InpSRRoundStepUSD          = 10.0;
+input double          InpSRRoundSubStepUSD       = 5.0;
+input int             InpSRRoundMaxLevels        = 6;
+input bool            InpSRUseFVGConfluence      = true;
+input bool            InpSRUseVWAPConfluence     = false;
+input ENUM_TIMEFRAMES InpSRZoneATRTF             = PERIOD_M15;
+input double          InpSRZoneThicknessATR      = 0.35;
+input double          InpSRZoneMinPoints         = 20;
+input double          InpSRZoneMaxPoints         = 150;
+input double          InpSRMergeOverlapATR       = 0.25;
+input int             InpSRMaxZonesPerSide       = 6;
+input int             InpSRMaxTotalZones         = 24;
+input double          InpSRMaxDistanceATR        = 12.0;
+input double          InpSRTouchToleranceATR     = 0.20;
+input int             InpSRMinTouches            = 1;
+input double          InpSRWeightTouch           = 1.00;
+input double          InpSRWeightRejection       = 0.50;
+input double          InpSRWeightTF_M15          = 1.00;
+input double          InpSRWeightTF_H1           = 2.00;
+input double          InpSRWeightTF_H4           = 3.00;
+input double          InpSRWeightTF_D1           = 4.00;
+input double          InpSRWeightPrevDay         = 2.00;
+input double          InpSRWeightPrevWeek        = 2.50;
+input double          InpSRWeightSession         = 1.50;
+input double          InpSRWeightRound           = 1.00;
+input double          InpSRWeightDailyOpen       = 1.00;
+input double          InpSRWeightFVG             = 1.00;
+input double          InpSRWeightVWAP            = 1.00;
+input double          InpSRFreshBonus            = 0.50;
+input double          InpSRBreakPenalty          = 1.50;
+input int             InpSRRecencyHalfLifeBars   = 400;
+input double          InpSRMinStrengthToUse      = 3.00;
+input double          InpSRWallMinStrength       = 5.00;
+input double          InpSRBlockIntoWallATR      = 0.45;
+input bool            InpSRRequireHeadroomTP1    = true;
+input double          InpSRHeadroomFactor        = 1.10;
+input bool            InpSRAllowBreakoutThrough  = true;
+input double          InpSRBreakoutBufferATR     = 0.15;
+input int             InpSRScoreBonus            = 1;
+input int             InpSRScorePenalty          = 1;
+input bool            InpSRSnapTP                = true;
+input double          InpSRSnapTPMaxShiftATR     = 0.25;
+input int             InpSRTPFrontRunPoints      = 8;
+input bool            InpSRSLBehindZone          = true;
+input double          InpSRSLBufferATR           = 0.10;
+input double          InpSRSLMaxExtraATR         = 0.30;
+input bool            InpSRTrailUseZones         = true;
+input bool            InpSRDrawZones             = true;
+input int             InpSRMaxDrawZones          = 12;
+input color           InpSRColorResistance       = clrIndianRed;
+input color           InpSRColorSupport          = clrMediumSeaGreen;
+input color           InpSRColorBroken           = clrDimGray;
+input bool            InpSRZoneFill              = true;
+input bool            InpSRShowLabels            = true;
+input bool            InpSRShowOnPanel           = true;
+input bool            InpSRLogLevels             = true;
+input int             InpSRLogEveryNSeconds      = 300;
+input string          InpSRObjPrefix             = "PAT_SR_";
+
+//================ SR MODULE BEGIN ================
+// Self-contained HTF Support/Resistance zones (prompt.md mission 2).
+// ADDITIVE ONLY: with InpUseSRZones=false every entry point below returns
+// immediately and the EA behaves bit-identically to the pre-SR build, with no
+// per-tick cost. The module never generates entry signals, never increases
+// risk, and never moves a stop against a position. All history reads happen
+// inside the throttled SR_Rebuild(); the per-tick hot paths (entry gate, TP/SL
+// adjustment, trail anchor) are O(n) scans over a fixed capped array with no
+// CopyRates / iCustom calls.
+
+#define SR_MAX_ZONES 64          // compile-time array cap; InpSRMaxTotalZones caps at runtime
+#define SR_MAX_CAND  512         // staging candidates per rebuild
+
+struct SRZone
+{
+   double   lower;        // zone lower edge (price)
+   double   upper;        // zone upper edge (price)
+   double   anchor;       // originating level price
+   int      side;         // +1 = above current price (resistance), -1 = below (support)
+   double   strength;     // final weighted score after decay
+   double   rawStrength;  // pre-decay
+   int      touches;      // confirmed touches within tolerance
+   int      rejections;   // touches that closed back outside
+   int      breaks;       // confirmed closes through the zone
+   bool     broken;       // currently invalidated
+   datetime lastTouch;
+   datetime created;
+   int      tfMask;       // bitmask of contributing timeframes (1=TF1 2=TF2 4=TF3 8=TF4)
+   int      srcMask;      // bitmask of ENUM_SR_SRC contributors
+   bool     fresh;        // price has not touched the zone since it formed
+};
+
+SRZone   g_srCand[SR_MAX_CAND];  int g_srCandN=0;
+SRZone   g_srZones[SR_MAX_ZONES];int g_srCount=0;
+int      g_srAge[SR_MAX_ZONES];  // bars since most recent touch (per zone)
+double   g_srZoneATR=0;          // ATR of InpSRZoneATRTF, refreshed per rebuild
+datetime g_srLastRebuild=0;
+datetime g_srLastHTFBar=0;
+datetime g_srRebuildWarnAt=0;
+uint     g_srLastRebuildUs=0;
+datetime g_srLastSelfTest=0;
+bool     g_srTpSnapped=false;    // per-arm telemetry for the CSV row
+bool     g_srSlShifted=false;
+string   g_srBlockReason="SR_OK";
+
+//--- fixed-size staging: append one candidate level -------------------------
+void SR_AddCandidate(double anchor,int tfBit,int src)
+{
+   if(g_srCandN>=SR_MAX_CAND)return;
+   if(anchor<=0)return;
+   SRZone z;ZeroMemory(z);
+   z.anchor=anchor;z.lower=anchor;z.upper=anchor;z.side=0;
+   z.rawStrength=0;z.strength=0;z.touches=0;z.rejections=0;z.breaks=0;z.broken=false;
+   z.lastTouch=0;z.created=ServerNow();z.tfMask=tfBit;z.srcMask=src;z.fresh=true;
+   g_srCand[g_srCandN++]=z;
+}
+
+//--- lifecycle ---------------------------------------------------------------
+bool SR_Init()
+{
+   g_srCandN=0;g_srCount=0;g_srZoneATR=0;g_srLastRebuild=0;g_srLastHTFBar=0;
+   g_srTpSnapped=false;g_srSlShifted=false;g_srBlockReason="SR_OK";g_srLastSelfTest=0;
+   if(!InpUseSRZones)return true;
+   SR_Rebuild(true);
+   if(InpSRLogLevels)SR_LogSnapshot();
+   return true;
+}
+void SR_Deinit(){ if(InpUseSRZones)SR_ClearObjects(); }
+void SR_Reset(){ g_srCandN=0;g_srCount=0; }
+
+double SR_ZoneATRCalc()
+{
+   MqlRates r[];ArraySetAsSeries(r,true);
+   int n=21;if(CopyRates(eaSymbol,InpSRZoneATRTF,1,n,r)<n-1)return 0;
+   double tr=0;int cnt=0;
+   for(int i=0;i<n-1;i++)
+   {double hi=MathMax(r[i].high,r[i+1].close),lo=MathMin(r[i].low,r[i+1].close);tr+=hi-lo;cnt++;}
+   return (cnt>0?tr/cnt:0);
+}
+
+//--- throttled full rebuild --------------------------------------------------
+bool SR_Rebuild(bool force=false)
+{
+   if(!InpUseSRZones)return false;
+   datetime now=ServerNow();
+   bool newHTF=false;
+   if(InpSRRebuildOnNewHTFBar)
+   {
+      datetime t1=iTime(eaSymbol,InpSR_TF1,0),t2=iTime(eaSymbol,InpSR_TF2,0);
+      datetime t3=iTime(eaSymbol,InpSR_TF3,0),t4=iTime(eaSymbol,InpSR_TF4,0);
+      datetime h=t1;if(t2>h)h=t2;if(t3>h)h=t3;if(t4>h)h=t4;
+      if(h>0&&h!=g_srLastHTFBar){newHTF=true;g_srLastHTFBar=h;}
+   }
+   if(!force)
+   {
+      if(g_srLastRebuild>0&&now-g_srLastRebuild<1)return false;                    // max once per tick
+      if(g_srLastRebuild>0&&now-g_srLastRebuild<InpSRRefreshSeconds&&!newHTF)return false;
+   }
+   g_srLastRebuild=now;
+   ulong us=GetMicrosecondCount();
+   g_srZoneATR=SR_ZoneATRCalc();
+   double atr=g_atr;if(atr<=0)atr=g_srZoneATR;
+   double px=iClose(eaSymbol,PERIOD_M1,0);
+   if(atr<=0||px<=0)return false;               // degrade to zero zones, never hard-stop
+   SR_Reset();
+   if(InpSRUsePivotSwings)
+   {
+      SR_CollectPivots(InpSR_TF1,InpSR_BarsTF1,InpSRWeightTF_M15);
+      SR_CollectPivots(InpSR_TF2,InpSR_BarsTF2,InpSRWeightTF_H1);
+      SR_CollectPivots(InpSR_TF3,InpSR_BarsTF3,InpSRWeightTF_H4);
+      SR_CollectPivots(InpSR_TF4,InpSR_BarsTF4,InpSRWeightTF_D1);
+   }
+   if(InpSRUsePrevDayHL)SR_CollectPrevDayHL();
+   if(InpSRUsePrevWeekHL)SR_CollectPrevWeekHL();
+   if(InpSRUseSessionHL)SR_CollectSessionHL();
+   if(InpSRUseDailyOpen)SR_CollectDailyOpen();
+   if(InpSRUseRoundNumbers)SR_CollectRoundNumbers(px);
+   SR_CollectStructureConfluence();
+   SR_MergeZones(atr);
+   SR_CountTouches(atr);
+   SR_ApplyRecencyDecay();
+   SR_ScoreZones(atr);
+   SR_ClassifySides(px);
+   SR_PruneWeakAndDistant(px,atr);
+   g_srLastRebuildUs=(uint)(GetMicrosecondCount()-us);
+   if(g_srLastRebuildUs>20000)
+   {
+      if(g_srRebuildWarnAt==0||now>g_srRebuildWarnAt)
+      {Print("SR rebuild slow: ",g_srLastRebuildUs," us, zones=",g_srCount);g_srRebuildWarnAt=now+300;}
+   }
+   else g_srRebuildWarnAt=0;
+   if(InpSRDrawZones)SR_Draw();
+   return true;
+}
+
+//--- collection --------------------------------------------------------------
+void SR_CollectPivots(ENUM_TIMEFRAMES tf,int bars,double tfWeight)
+{
+   if(tfWeight<=0||bars<InpSRFractalLeft+InpSRFractalRight+2)return;
+   if(Bars(eaSymbol,tf)<bars)return;                       // insufficient history: skip silently
+   MqlRates r[];ArraySetAsSeries(r,true);
+   int got=CopyRates(eaSymbol,tf,1,bars,r);                // shift 1: skip the forming bar
+   if(got<InpSRFractalLeft+InpSRFractalRight+2)return;
+   int tfBit=(tf==InpSR_TF1?1:(tf==InpSR_TF2?2:(tf==InpSR_TF3?4:8)));
+   for(int i=InpSRFractalRight;i<=got-1-InpSRFractalLeft;i++)
+   {
+      bool ph=true,pl=true;
+      for(int k=1;k<=InpSRFractalLeft;k++)
+      {if(r[i].high<r[i+k].high)ph=false;if(r[i].low>r[i+k].low)pl=false;}
+      for(int k=1;k<=InpSRFractalRight;k++)
+      {if(r[i].high<r[i-k].high)ph=false;if(r[i].low>r[i-k].low)pl=false;}
+      if(ph)SR_AddCandidate(r[i].high,tfBit,SRSRC_PIVOT);
+      if(pl)SR_AddCandidate(r[i].low,tfBit,SRSRC_PIVOT);
+   }
+}
+void SR_CollectPrevDayHL()
+{
+   double h=iHigh(eaSymbol,PERIOD_D1,1),l=iLow(eaSymbol,PERIOD_D1,1);
+   if(h>0)SR_AddCandidate(h,0,SRSRC_PREVDAY);
+   if(l>0)SR_AddCandidate(l,0,SRSRC_PREVDAY);
+}
+void SR_CollectPrevWeekHL()
+{
+   double h=iHigh(eaSymbol,PERIOD_W1,1),l=iLow(eaSymbol,PERIOD_W1,1);
+   if(h>0)SR_AddCandidate(h,0,SRSRC_PREVWEEK);
+   if(l>0)SR_AddCandidate(l,0,SRSRC_PREVWEEK);
+}
+void SR_CollectSessionHL()
+{
+   // Previous UTC day ranges: Asian 00:00-06:45, London 07:00-11:00, NY 13:30-17:00.
+   datetime utc=UTCNow();
+   MqlDateTime d;TimeToStruct(utc,d);d.hour=0;d.min=0;d.sec=0;
+   datetime today=StructToTime(d),ystart=today-86400;
+   int need=(int)((utc-ystart)/60)+120;if(need>3000)need=3000;
+   MqlRates r[];ArraySetAsSeries(r,true);
+   int got=CopyRates(eaSymbol,PERIOD_M1,1,need,r);if(got<60)return;
+   double aH=0,aL=0,lH=0,lL=0,nH=0,nL=0;
+   for(int i=0;i<got;i++)
+   {
+      datetime ut=(datetime)((long)r[i].time-g_serverOffsetSec);
+      long sec=(long)ut;if(sec<(long)ystart||sec>=(long)today)continue;
+      int um=(int)((sec-(long)ystart)/60);
+      if(um<7*60){if(r[i].high>aH)aH=r[i].high;if(r[i].low<aL||aL==0)aL=r[i].low;}
+      else if(um>=7*60&&um<=11*60){if(r[i].high>lH)lH=r[i].high;if(r[i].low<lL||lL==0)lL=r[i].low;}
+      else if(um>=13*60+30&&um<=17*60){if(r[i].high>nH)nH=r[i].high;if(r[i].low<nL||nL==0)nL=r[i].low;}
+   }
+   if(aH>0)SR_AddCandidate(aH,0,SRSRC_SESSION);
+   if(aL>0)SR_AddCandidate(aL,0,SRSRC_SESSION);
+   if(lH>0)SR_AddCandidate(lH,0,SRSRC_SESSION);
+   if(lL>0)SR_AddCandidate(lL,0,SRSRC_SESSION);
+   if(nH>0)SR_AddCandidate(nH,0,SRSRC_SESSION);
+   if(nL>0)SR_AddCandidate(nL,0,SRSRC_SESSION);
+}
+void SR_CollectDailyOpen()
+{
+   double o=iOpen(eaSymbol,PERIOD_D1,0);
+   if(o>0)SR_AddCandidate(o,0,SRSRC_DAILYOPEN);
+}
+void SR_CollectRoundNumbers(double price)
+{
+   double step=MathMax(1.0,InpSRRoundStepUSD);
+   double sub=MathMax(0.0,InpSRRoundSubStepUSD);
+   int maxL=MathMax(0,InpSRRoundMaxLevels);if(maxL<=0)return;
+   double base=MathRound(price/step)*step;
+   int added=0;
+   for(int k=-maxL;k<=maxL&&added<maxL*2;k++)
+   {
+      double lvl=base+k*step;if(lvl<=0)continue;
+      SR_AddCandidate(lvl,0,SRSRC_ROUND);added++;
+      if(sub>0&&added<maxL*2)
+      {double l2=lvl+sub;if(l2>0&&l2<base+(maxL+1)*step){SR_AddCandidate(l2,0,SRSRC_ROUND);added++;}}
+   }
+}
+void SR_CollectStructureConfluence()
+{
+   if(InpSRUseFVGConfluence)
+   {
+      // FVG / IFVG / PTB band edges tag confluence; IFVG & PTB share the FVG weight
+      // (the scoring spec has no separate weight inputs for them).
+      if(g_fvg){SR_AddCandidate(g_fvgTop,0,SRSRC_FVG);SR_AddCandidate(g_fvgBottom,0,SRSRC_FVG);}
+      if(g_ifvg){SR_AddCandidate(g_ifvgTop,0,SRSRC_IFVG);SR_AddCandidate(g_ifvgBottom,0,SRSRC_IFVG);}
+      if(g_ptb){SR_AddCandidate(g_ptbTop,0,SRSRC_PTB);SR_AddCandidate(g_ptbBottom,0,SRSRC_PTB);}
+   }
+   if(InpSRUseVWAPConfluence&&g_vwap>0)
+   {
+      SR_AddCandidate(g_vwap,0,SRSRC_VWAP);
+      if(g_vwapUp>0)SR_AddCandidate(g_vwapUp,0,SRSRC_VWAP);
+      if(g_vwapDn>0)SR_AddCandidate(g_vwapDn,0,SRSRC_VWAP);
+   }
+}
+
+//--- processing --------------------------------------------------------------
+double SR_Thickness()
+{
+   double atrZ=(g_srZoneATR>0?g_srZoneATR:g_atr);
+   if(atrZ<=0)return 0;
+   double th=InpSRZoneThicknessATR*atrZ;
+   double lo=InpSRZoneMinPoints*broker.point,hi=InpSRZoneMaxPoints*broker.point;
+   if(hi<lo)hi=lo;
+   return MathMax(lo,MathMin(hi,th));
+}
+
+void SR_MergeZones(double atr)
+{
+   double th=SR_Thickness();if(th<=0)return;
+   for(int i=0;i<g_srCandN;i++)
+   {g_srCand[i].lower=PriceNorm(g_srCand[i].anchor-th/2);g_srCand[i].upper=PriceNorm(g_srCand[i].anchor+th/2);}
+   for(int pass=0;pass<3;pass++)
+   {
+      bool merged=false;
+      for(int i=0;i<g_srCandN&&g_srCandN>1;i++)
+      {
+         if(merged)break;
+         if(g_srCand[i].anchor<=0)continue;
+         for(int j=i+1;j<g_srCandN;j++)
+         {
+            if(g_srCand[j].anchor<=0)continue;
+            bool overlap=(g_srCand[i].lower<=g_srCand[j].upper&&g_srCand[j].lower<=g_srCand[i].upper);
+            bool near=(MathAbs(g_srCand[i].anchor-g_srCand[j].anchor)<=InpSRMergeOverlapATR*atr);
+            if(!overlap&&!near)continue;
+            double wA=MathMax(1e-9,g_srCand[i].rawStrength),wB=MathMax(1e-9,g_srCand[j].rawStrength),sum=wA+wB;
+            g_srCand[i].anchor=(g_srCand[i].anchor*wA+g_srCand[j].anchor*wB)/sum;   // strength-weighted
+            g_srCand[i].lower=MathMin(g_srCand[i].lower,g_srCand[j].lower);
+            g_srCand[i].upper=MathMax(g_srCand[i].upper,g_srCand[j].upper);
+            g_srCand[i].touches+=g_srCand[j].touches;
+            g_srCand[i].rejections+=g_srCand[j].rejections;
+            g_srCand[i].breaks=MathMax(g_srCand[i].breaks,g_srCand[j].breaks);
+            g_srCand[i].tfMask|=g_srCand[j].tfMask;
+            g_srCand[i].srcMask|=g_srCand[j].srcMask;
+            g_srCand[i].rawStrength=sum;
+            if(g_srCand[i].created>g_srCand[j].created)g_srCand[i].created=g_srCand[j].created;
+            if(g_srCand[i].lastTouch<g_srCand[j].lastTouch)g_srCand[i].lastTouch=g_srCand[j].lastTouch;
+            g_srCand[j]=g_srCand[g_srCandN-1];g_srCandN--;   // remove j (swap-with-last)
+            merged=true;
+            break;   // re-scan from the next pass
+         }
+      }
+      if(!merged)break;
+   }
+   g_srCount=0;
+   for(int i=0;i<g_srCandN&&g_srCount<SR_MAX_ZONES;i++)g_srZones[g_srCount++]=g_srCand[i];
+}
+
+void SR_CountTouches(double atr)
+{
+   if(g_srCount<=0)return;
+   int need=MathMax(InpSR_BarsTF1,500);if(need>5000)need=5000;
+   MqlRates r[];ArraySetAsSeries(r,true);
+   int got=CopyRates(eaSymbol,PERIOD_M1,1,need,r);if(got<=0)return;
+   double tol=InpSRTouchToleranceATR*atr,buf=InpSRBreakoutBufferATR*atr;
+   for(int zi=0;zi<g_srCount;zi++)
+   {
+      int touches=0,rej=0,brks=0,lastTouchIdx=-1,lastRejIdx=-1,lastBrkIdx=-1,runStart=-10;
+      datetime lastT=0;
+      for(int i=got-1;i>=0;i--)      // oldest -> newest
+      {
+         bool overlap=(r[i].high>=g_srZones[zi].lower-tol&&r[i].low<=g_srZones[zi].upper+tol);
+         bool closedOutside=(r[i].close>g_srZones[zi].upper||r[i].close<g_srZones[zi].lower);
+         bool brokeOut=(r[i].close>g_srZones[zi].upper+buf||r[i].close<g_srZones[zi].lower-buf);
+         if(overlap)
+         {
+            if(i-runStart>3){touches++;lastTouchIdx=i;lastT=(datetime)r[i].time;}  // consecutive touches within 3 bars count once
+            if(i-runStart>3)runStart=i;
+            if(overlap&&closedOutside){rej++;lastRejIdx=i;}
+         }
+         if(brokeOut){brks++;lastBrkIdx=i;}
+      }
+      g_srZones[zi].touches=touches;
+      g_srZones[zi].rejections=rej;
+      g_srZones[zi].breaks=brks;
+      g_srZones[zi].lastTouch=lastT;
+      // a break is confirmed when breaks>=1 and the most recent break is newer than the most recent rejection
+      g_srZones[zi].broken=(brks>=1&&lastBrkIdx>=0&&lastBrkIdx<lastRejIdx);
+      g_srAge[zi]=(lastTouchIdx>=0?lastTouchIdx:got);   // bars since most recent touch
+   }
+}
+
+void SR_ApplyRecencyDecay()
+{
+   // strength = rawStrength * 0.5^(barsSinceTouch / halfLife); final clamp in SR_ScoreZones
+   for(int zi=0;zi<g_srCount;zi++)
+   {
+      double hl=MathMax(1,InpSRRecencyHalfLifeBars);
+      double decay=MathPow(0.5,(double)g_srAge[zi]/hl);
+      g_srZones[zi].strength=g_srZones[zi].rawStrength*decay;   // provisional; rescored below
+   }
+}
+
+void SR_ScoreZones(double atr)
+{
+   if(atr<=0)return;
+   for(int zi=0;zi<g_srCount;zi++)
+   {
+      double tfSum=0;
+      if((g_srZones[zi].tfMask&1)!=0)tfSum+=InpSRWeightTF_M15;
+      if((g_srZones[zi].tfMask&2)!=0)tfSum+=InpSRWeightTF_H1;
+      if((g_srZones[zi].tfMask&4)!=0)tfSum+=InpSRWeightTF_H4;
+      if((g_srZones[zi].tfMask&8)!=0)tfSum+=InpSRWeightTF_D1;
+      int m=g_srZones[zi].srcMask;double srcSum=0;
+      if((m&SRSRC_PREVDAY)!=0)srcSum+=InpSRWeightPrevDay;
+      if((m&SRSRC_PREVWEEK)!=0)srcSum+=InpSRWeightPrevWeek;
+      if((m&SRSRC_SESSION)!=0)srcSum+=InpSRWeightSession;
+      if((m&SRSRC_ROUND)!=0)srcSum+=InpSRWeightRound;
+      if((m&SRSRC_DAILYOPEN)!=0)srcSum+=InpSRWeightDailyOpen;
+      if((m&(SRSRC_FVG|SRSRC_IFVG|SRSRC_PTB))!=0)srcSum+=InpSRWeightFVG;
+      if((m&SRSRC_VWAP)!=0)srcSum+=InpSRWeightVWAP;
+      g_srZones[zi].fresh=(g_srZones[zi].touches==0);   // approximation: an untouched zone is fresh
+      g_srZones[zi].rawStrength=InpSRWeightTouch*g_srZones[zi].touches
+                               +InpSRWeightRejection*g_srZones[zi].rejections
+                               +tfSum+srcSum
+                               +(g_srZones[zi].fresh?InpSRFreshBonus:0)
+                               -InpSRBreakPenalty*g_srZones[zi].breaks;
+      double hl=MathMax(1,InpSRRecencyHalfLifeBars);
+      double decay=MathPow(0.5,(double)g_srAge[zi]/hl);
+      g_srZones[zi].strength=MathMax(0.0,g_srZones[zi].rawStrength*decay);
+      if(g_srZones[zi].broken)   // a broken zone keeps at most 50% of its strength
+         g_srZones[zi].strength=MathMin(g_srZones[zi].strength,0.5*MathMax(0.0,g_srZones[zi].rawStrength));
+   }
+}
+
+void SR_ClassifySides(double price)
+{
+   for(int zi=0;zi<g_srCount;zi++)
+      g_srZones[zi].side=(g_srZones[zi].anchor>=price?1:-1);
+}
+
+void SR_PruneWeakAndDistant(double price,double atr)
+{
+   for(int i=0;i<g_srCount;i++)
+   {
+      bool drop=(g_srZones[i].strength<InpSRMinStrengthToUse);
+      if(!drop&&g_srZones[i].touches<InpSRMinTouches&&g_srZones[i].srcMask==SRSRC_ROUND)drop=true;
+      if(!drop&&atr>0&&MathAbs(g_srZones[i].anchor-price)>InpSRMaxDistanceATR*atr)drop=true;
+      if(drop){for(int k=i;k<g_srCount-1;k++)g_srZones[k]=g_srZones[k+1];g_srCount--;i--;}
+   }
+   // strongest-first ranking, then per-side and total caps
+   if(g_srCount>1)
+   {
+      int idx[SR_MAX_ZONES];int n=g_srCount;
+      for(int i=0;i<n;i++)idx[i]=i;
+      for(int i=0;i<n-1;i++)
+         for(int j=i+1;j<n;j++)
+            if(g_srZones[idx[j]].strength>g_srZones[idx[i]].strength){int t=idx[i];idx[i]=idx[j];idx[j]=t;}
+      SRZone keep[SR_MAX_ZONES];int kn=0,up=0,dn=0;
+      for(int i=0;i<n;i++)
+      {
+         if(kn>=InpSRMaxTotalZones)break;
+         SRZone z=g_srZones[idx[i]];
+         if(z.side>0){if(up>=InpSRMaxZonesPerSide)continue;up++;}
+         else      {if(dn>=InpSRMaxZonesPerSide)continue;dn++;}
+         keep[kn++]=z;
+      }
+      g_srCount=kn;
+      for(int i=0;i<kn;i++)g_srZones[i]=keep[i];
+   }
+}
+
+//--- queries (O(n) over the capped array; NO CopyRates here) -----------------
+bool SR_NearestAbove(double price,double minStrength,double &nearEdge,double &farEdge,double &strength,int &idx)
+{
+   nearEdge=0;farEdge=0;strength=0;idx=-1;double best=0;
+   if(!InpUseSRZones)return false;
+   for(int zi=0;zi<g_srCount;zi++)
+   {
+      if(g_srZones[zi].side<0)continue;
+      if(g_srZones[zi].broken&&g_srZones[zi].rejections<=0)continue;   // broken zone usable only with a post-break rejection
+      if(g_srZones[zi].strength<minStrength)continue;
+      double edge=g_srZones[zi].lower;if(edge<=price)edge=g_srZones[zi].upper;
+      if(edge<=price)continue;
+      if(best==0||edge<best){best=edge;nearEdge=edge;farEdge=g_srZones[zi].upper;strength=g_srZones[zi].strength;idx=zi;}
+   }
+   return (idx>=0);
+}
+bool SR_NearestBelow(double price,double minStrength,double &nearEdge,double &farEdge,double &strength,int &idx)
+{
+   nearEdge=0;farEdge=0;strength=0;idx=-1;double best=0;
+   if(!InpUseSRZones)return false;
+   for(int zi=0;zi<g_srCount;zi++)
+   {
+      if(g_srZones[zi].side>0)continue;
+      if(g_srZones[zi].broken&&g_srZones[zi].rejections<=0)continue;
+      if(g_srZones[zi].strength<minStrength)continue;
+      double edge=g_srZones[zi].upper;if(edge>=price)edge=g_srZones[zi].lower;
+      if(edge>=price)continue;
+      if(best==0||edge>best){best=edge;nearEdge=edge;farEdge=g_srZones[zi].lower;strength=g_srZones[zi].strength;idx=zi;}
+   }
+   return (idx>=0);
+}
+double SR_HeadroomPrice(int dir,double entry,double minStrength)
+{
+   double ne,fe,st;int ix;
+   if(dir>0){if(SR_NearestAbove(entry,minStrength,ne,fe,st,ix))return ne;}
+   else     {if(SR_NearestBelow(entry,minStrength,ne,fe,st,ix))return ne;}
+   return 0;
+}
+double SR_HeadroomATR(int dir,double entry,double atr,double minStrength)
+{
+   if(atr<=0)return 0;
+   double h=SR_HeadroomPrice(dir,entry,minStrength);
+   return (h>0?(dir*(h-entry))/atr:0);
+}
+bool SR_PriceInsideZone(double price,int &idx)
+{
+   idx=-1;if(!InpUseSRZones)return false;
+   for(int zi=0;zi<g_srCount;zi++)
+      if(price>=g_srZones[zi].lower&&price<=g_srZones[zi].upper){idx=zi;return true;}
+   return false;
+}
+bool SR_BreakoutConfirmed(int dir,double atr)
+{
+   if(atr<=0)return false;
+   double buf=InpSRBreakoutBufferATR*atr;
+   double c1=iClose(eaSymbol,PERIOD_M1,1);if(c1<=0)return false;
+   for(int zi=0;zi<g_srCount;zi++)
+   {
+      if(dir>0&&g_srZones[zi].side>0&&c1>g_srZones[zi].upper+buf)return true;   // buy closing above resistance
+      if(dir<0&&g_srZones[zi].side<0&&c1<g_srZones[zi].lower-buf)return true;   // sell closing below support
+   }
+   return false;
+}
+
+//--- decision helpers --------------------------------------------------------
+bool SR_EntryAllowed(int dir,double entry,double atr,double tp1Distance,string &reason)
+{
+   reason="SR_OK";
+   if(!InpUseSRZones)return true;
+   if(atr<=0)return true;                          // never block on missing data
+   if(InpSRMode==SR_ADVISORY)return true;          // score + display only
+   double ne,fe,st;int ix;
+   bool wall=(dir>0?SR_NearestAbove(entry,InpSRWallMinStrength,ne,fe,st,ix)
+                   :SR_NearestBelow(entry,InpSRWallMinStrength,ne,fe,st,ix));
+   if(wall)
+   {
+      double dist=MathAbs(ne-entry)/atr;
+      bool breakoutOK=(InpSRAllowBreakoutThrough&&SR_BreakoutConfirmed(dir,atr));
+      if(dist<=InpSRBlockIntoWallATR&&!breakoutOK)
+      {reason=StringFormat("SR_WALL_%.1f@%.2fA",st,dist);g_srBlockReason=reason;return false;}
+      if(InpSRMode==SR_HARD_FILTER&&InpSRRequireHeadroomTP1)
+      {
+         double have=SR_HeadroomPrice(dir,entry,InpSRWallMinStrength);
+         double need=tp1Distance*InpSRHeadroomFactor;
+         if(have<=0||MathAbs(have-entry)<need){reason="SR_NO_HEADROOM";g_srBlockReason=reason;return false;}
+      }
+   }
+   g_srBlockReason="SR_OK";
+   return true;
+}
+
+int SR_DirectionalVote(int dir,double entry,double atr)
+{
+   if(!InpUseSRZones||atr<=0)return 0;
+   if(InpMinFilterScore<=1)return 0;   // a +-1 vote must never satisfy the filter score on its own
+   double ne,fe,st;int ix;
+   bool opp=(dir>0?SR_NearestAbove(entry,InpSRWallMinStrength,ne,fe,st,ix)
+                  :SR_NearestBelow(entry,InpSRWallMinStrength,ne,fe,st,ix));
+   if(opp&&MathAbs(ne-entry)<=InpSRBlockIntoWallATR*atr)return -InpSRScorePenalty;   // entering an opposing wall
+   bool sup=(dir>0?SR_NearestBelow(entry,InpSRMinStrengthToUse,ne,fe,st,ix)
+                  :SR_NearestAbove(entry,InpSRMinStrengthToUse,ne,fe,st,ix));
+   if(sup)return InpSRScoreBonus;                                                      // leaving a supportive zone
+   return 0;
+}
+
+double SR_AdjustTP(int dir,double entry,double tpIn,double atr,int legIndex)
+{
+   if(!InpUseSRZones||!InpSRSnapTP||atr<=0)return tpIn;
+   double ne,fe,st;int ix;
+   bool found=(dir>0?SR_NearestAbove(entry,InpSRMinStrengthToUse,ne,fe,st,ix)
+                    :SR_NearestBelow(entry,InpSRMinStrengthToUse,ne,fe,st,ix));
+   if(!found)return tpIn;
+   double fr=InpSRTPFrontRunPoints*broker.point;
+   double cand=(dir>0?ne-fr:ne+fr);                 // front-run the near edge
+   if(dir>0&&cand<=entry)return tpIn;
+   if(dir<0&&cand>=entry)return tpIn;
+   if(MathAbs(cand-tpIn)>InpSRSnapTPMaxShiftATR*atr)return tpIn;   // shift cap
+   if(MathAbs(cand-entry)<MinTradeDistance())return tpIn;          // broker stop/freeze distance
+   return PriceNorm(cand);
+}
+
+double SR_AdjustSL(int dir,double entry,double slIn,double atr)
+{
+   if(!InpUseSRZones||!InpSRSLBehindZone||atr<=0)return slIn;
+   double ne,fe,st;int ix;
+   bool zone=(dir>0?SR_NearestBelow(entry,InpSRMinStrengthToUse,ne,fe,st,ix)
+                   :SR_NearestAbove(entry,InpSRMinStrengthToUse,ne,fe,st,ix));
+   if(!zone)return slIn;
+   double cand=(dir>0?g_srZones[ix].lower-InpSRSLBufferATR*atr
+                      :g_srZones[ix].upper+InpSRSLBufferATR*atr);   // behind the whole zone
+   bool between=(dir>0?(cand<entry&&cand>=slIn-InpSRSLBufferATR*atr)
+                      :(cand>entry&&cand<=slIn+InpSRSLBufferATR*atr));
+   if(!between)return slIn;
+   if(dir>0&&cand>=slIn)return slIn;   // never tighten the stop
+   if(dir<0&&cand<=slIn)return slIn;
+   if(MathAbs(entry-cand)-MathAbs(entry-slIn)>InpSRSLMaxExtraATR*atr)return slIn;   // widening cap
+   double minDist=(double)MathMax(broker.stopsLevel,broker.freezeLevel)*broker.point;
+   if(MathAbs(entry-cand)<minDist)return slIn;
+   return PriceNorm(cand);
+}
+
+double SR_TrailAnchor(int dir,double atr)
+{
+   if(!InpUseSRZones||!InpSRTrailUseZones||atr<=0)return 0;
+   double px=(dir>0?Bid():Ask());
+   double ne,fe,st;int ix;
+   bool zone=(dir>0?SR_NearestBelow(px,InpSRMinStrengthToUse,ne,fe,st,ix)
+                   :SR_NearestAbove(px,InpSRMinStrengthToUse,ne,fe,st,ix));
+   if(!zone)return 0;
+   double cand=(dir>0?g_srZones[ix].lower-InpSRSLBufferATR*atr
+                      :g_srZones[ix].upper+InpSRSLBufferATR*atr);   // protection behind the zone
+   if(dir>0&&cand>=px)return 0;
+   if(dir<0&&cand<=px)return 0;
+   return PriceNorm(cand);
+}
+
+//--- presentation ------------------------------------------------------------
+void SR_ClearObjects(){ ObjectsDeleteAll(0,InpSRObjPrefix,0,-1); }
+
+void SR_Draw()
+{
+   if(!InpUseSRZones||!InpSRDrawZones)return;
+   if(MQLInfoInteger(MQL_TESTER)&&!MQLInfoInteger(MQL_VISUAL_MODE))return;   // skip drawing in non-visual tester
+   int n=MathMin(g_srCount,MathMax(0,InpSRMaxDrawZones));
+   datetime t1=ServerNow()-PeriodSeconds(InpSR_TF3)*20,t2=ServerNow()+PeriodSeconds(PERIOD_M1)*120;
+   for(int i=0;i<n;i++)
+   {
+      string id=InpSRObjPrefix+"Z"+IntegerToString(i);
+      if(ObjectFind(0,id)<0)
+      {
+         ObjectCreate(0,id,OBJ_RECTANGLE,0,t1,g_srZones[i].lower,t2,g_srZones[i].upper);
+         ObjectSetInteger(0,id,OBJPROP_BACK,true);
+         ObjectSetInteger(0,id,OBJPROP_SELECTABLE,false);
+         ObjectSetInteger(0,id,OBJPROP_HIDDEN,true);
+         ObjectSetInteger(0,id,OBJPROP_FILL,InpSRZoneFill);
+      }
+      ObjectSetInteger(0,id,OBJPROP_TIME,0,t1);ObjectSetDouble(0,id,OBJPROP_PRICE,0,g_srZones[i].lower);
+      ObjectSetInteger(0,id,OBJPROP_TIME,1,t2);ObjectSetDouble(0,id,OBJPROP_PRICE,1,g_srZones[i].upper);
+      color c=(g_srZones[i].broken?InpSRColorBroken:(g_srZones[i].side>0?InpSRColorResistance:InpSRColorSupport));
+      ObjectSetInteger(0,id,OBJPROP_COLOR,c);
+      if(InpSRShowLabels)
+      {
+         string lid=InpSRObjPrefix+"L"+IntegerToString(i);
+         if(ObjectFind(0,lid)<0)
+         {
+            ObjectCreate(0,lid,OBJ_TEXT,0,t2,g_srZones[i].anchor);
+            ObjectSetInteger(0,lid,OBJPROP_SELECTABLE,false);
+            ObjectSetInteger(0,lid,OBJPROP_HIDDEN,true);
+            ObjectSetInteger(0,lid,OBJPROP_FONTSIZE,7);
+         }
+         ObjectSetInteger(0,lid,OBJPROP_TIME,0,t2);ObjectSetDouble(0,lid,OBJPROP_PRICE,0,g_srZones[i].anchor);
+         ObjectSetString(0,lid,OBJPROP_TEXT,StringFormat("%s s%.1f",(g_srZones[i].side>0?"R":"S"),g_srZones[i].strength));
+         ObjectSetInteger(0,lid,OBJPROP_COLOR,c);
+      }
+   }
+   for(int i=n;i<InpSRMaxDrawZones;i++)   // remove leftovers beyond the live count
+   {
+      string id=InpSRObjPrefix+"Z"+IntegerToString(i);if(ObjectFind(0,id)>=0)ObjectDelete(0,id);
+      string lid=InpSRObjPrefix+"L"+IntegerToString(i);if(ObjectFind(0,lid)>=0)ObjectDelete(0,lid);
+   }
+   static uint lastRedraw=0;
+   uint ms=GetTickCount();
+   if(ms-lastRedraw>=(uint)MathMax(100,InpDashRefreshMs)){ChartRedraw();lastRedraw=ms;}
+}
+
+string SR_PanelLine1()
+{
+   if(!InpUseSRZones)return "SR off";
+   double px=iClose(eaSymbol,PERIOD_M1,0);double atr=g_atr;
+   double ne,fe,st;int ix;string up="R:-",dn="S:-";
+   if(atr>0&&SR_NearestAbove(px,InpSRMinStrengthToUse,ne,fe,st,ix))
+      up=StringFormat("R:%.2f s%.1f d%.1fA",ne,st,MathAbs(ne-px)/atr);
+   if(atr>0&&SR_NearestBelow(px,InpSRMinStrengthToUse,ne,fe,st,ix))
+      dn=StringFormat("S:%.2f s%.1f d%.1fA",px==0?ne:ne,st,MathAbs(px-ne)/atr);
+   return "SR "+up+" | "+dn;
+}
+string SR_PanelLine2()
+{
+   if(!InpUseSRZones)return "SR zones 0 | off";
+   string md=(InpSRMode==SR_ADVISORY?"ADV":(InpSRMode==SR_SOFT_FILTER?"SOFT":"HARD"));
+   return StringFormat("SR zones %d | mode %s | block %s",g_srCount,md,g_srBlockReason);
+}
+void SR_LogSnapshot()
+{
+   Print("SR zones | idx|side|anchor|lower|upper|strength|touches|rej|breaks|tf|src|fresh|broken");
+   for(int zi=0;zi<g_srCount;zi++)
+      Print(StringFormat("%2d|%s|%.2f|%.2f|%.2f|%.2f|%d|%d|%d|%d|%d|%s|%s",
+            zi,(g_srZones[zi].side>0?"R":"S"),g_srZones[zi].anchor,g_srZones[zi].lower,g_srZones[zi].upper,
+            g_srZones[zi].strength,g_srZones[zi].touches,g_srZones[zi].rejections,g_srZones[zi].breaks,
+            g_srZones[zi].tfMask,g_srZones[zi].srcMask,(g_srZones[zi].fresh?"Y":"N"),(g_srZones[zi].broken?"Y":"N")));
+}
+void SR_SelfTest()
+{
+   if(!InpUseSRZones||!InpSRLogLevels)return;
+   datetime now=ServerNow();
+   if(g_srLastSelfTest>0&&now-g_srLastSelfTest<InpSRLogEveryNSeconds)return;
+   g_srLastSelfTest=now;
+   SR_LogSnapshot();
+}
+//================ SR MODULE END ==================
 //====================================================================
 // STRUCTS
 //====================================================================
@@ -484,7 +1215,7 @@ color C_SYD_DIM=C'20,60,90',C_TOK_DIM=C'50,32,90',C_LON_DIM=C'90,54,0',C_NY_DIM=
 #define L_SECTIONS 3
 #define L_ROWS     16
 #define R_SECTIONS 4
-#define R_ROWS     22
+#define R_ROWS     24      // 22 legacy + 2 SR rows [SR]
 int g_font=7,g_fontPx=9,g_dpi=96;
 double g_dpiScale=1.0;
 int g_rh=16,g_hdrH=30,g_colW=300,g_pad=12,g_gap=14,g_panelW=0;
@@ -1838,6 +2569,10 @@ void BuildThreeTargets(int dir,double entry,double lots,ENUM_WINDOW_ID w,bool hv
    double d2=MathMax(InpTP2_ATR_Floor*atr,MathMin(InpTP2_ATR_Cap*atr,1.10*atr))*k;
    double d3=MathMax(InpTP3_ATR_Floor*atr,MathMin(InpTP3_ATR_Cap*atr,1.85*atr))*(hv?1.05:1.0);
    tp1=entry+dir*d1;tp2=entry+dir*d2;tp3=entry+dir*d3;
+   // [SR] snap legs to nearby zone edges BEFORE validation so the existing
+   // monotonic/cost machinery re-validates on the snapped prices (constraint 7)
+   if(InpUseSRZones&&InpSRSnapTP)
+   {tp1=SR_AdjustTP(dir,entry,tp1,atr,1);tp2=SR_AdjustTP(dir,entry,tp2,atr,2);tp3=SR_AdjustTP(dir,entry,tp3,atr,3);}
    double md=MinTradeDistance();
    // Strict monotonic ladder first: TP1 < TP2 < TP3 can never be violated.
    if(dir>0){tp1=MathMax(tp1,entry+md);tp2=MathMax(tp2,tp1+md);tp3=MathMax(tp3,tp2+md);}
@@ -1950,6 +2685,11 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
          double op=PositionGetDouble(POSITION_PRICE_OPEN);
          if(MathAbs(px-op)<0.35*MathMax(g_atr,MinTradeDistance())){why="too close to open scalp";return false;}
       }
+      // [SR] entry gate: after all cost/spread/session/news gates, before dispatch
+      double srAtr=MathMax(g_atr,MinTradeDistance());
+      double srTp1=MathAbs(ScalpTarget1(dir,px)-px);
+      string srWhy="";
+      if(!SR_EntryAllowed(dir,px,srAtr,srTp1,srWhy)){why=srWhy;return false;}
       hv=false;
       if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}
       if(!broker.hedging&&CountOwnPositions()>0){why="netting: one position";return false;}
@@ -1964,7 +2704,9 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    double spp=SpreadPercentile();if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
    if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
    double disp=CandleDisplacementATR();if(disp>InpMaxChaseCandleATR){why="anti-chase displacement";return false;}double cc=iClose(eaSymbol,PERIOD_M1,1);if(g_vwap>0&&g_atr>0&&MathAbs(cc-g_vwap)/g_atr>InpMaxEntryVWAPDeviationATR){why="anti-chase VWAP distance";return false;}
-   if(InpFilterMode==FILTER_ALL_REQUIRED&&g_score<g_scoreMax){why="filters";return false;}if(InpFilterMode==FILTER_SCORING&&g_score<InpMinFilterScore){why="score";return false;}
+   if(InpFilterMode==FILTER_ALL_REQUIRED&&g_score<g_scoreMax){why="filters";return false;}
+   g_score+=SR_DirectionalVote(dir);   // [SR] complex-mode vote: -1..+1, can never satisfy MinFilterScore alone
+   if(InpFilterMode==FILTER_SCORING&&g_score<InpMinFilterScore){why="score";return false;}
    if(MathAbs(g_dirBias)<InpMinDirBias){why="weak directional bias";return false;}if((dir>0&&g_dirBias<0)||(dir<0&&g_dirBias>0)){why="bias conflict";return false;}
    if(InpUseSMC&&((dir>0?g_smcScoreBull:g_smcScoreBear)<InpMinSMCConfluence)){why="SMC confluence";return false;}
    if(!LiveMomentumConfirm(dir)){why="live price vs EMA20";return false;}
@@ -2183,6 +2925,19 @@ void TryArm()
    }
    else{sl=ComputeSL(dir,pending);slDist=MathAbs(pending-sl);}
    double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason="lot/risk zero";return;}
+   // [SR] optionally widen the stop behind an S/R zone, then recompute the lot so the
+   // risk % stays IDENTICAL (constraint 6). Invalid recompute -> keep the base stop.
+   if(InpSRSLBehindZone)
+   {
+      double srRef=(InpSimpleScalpMode?entry0:pending);   // the price the order actually enters at
+      double srSl=SR_AdjustSL(dir,srRef,sl,atr);
+      if(MathAbs(srSl-sl)>0)
+      {
+         double sd2=MathAbs(srRef-srSl);
+         double rl=CalculateLot(sd2,w,hv);
+         if(rl>0){sl=srSl;slDist=sd2;lots=rl;g_srSlShifted=true;}
+      }
+   }
    double risk=PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots);if(!RiskRoom(risk,dir,w,why)){g_gateReason=why;return;}
    double t1,t2,t3;
    if(InpSimpleScalpMode)
@@ -2192,8 +2947,21 @@ void TryArm()
       // (0.40 total / 0.75 total / 1.15 total ATR - authoritative profile)
       double atr2=MathMax(g_atr,MinTradeDistance());
       t2=PriceNorm(entry0+dir*0.75*atr2);t3=PriceNorm(entry0+dir*1.15*atr2);
+      // [SR] snap each scalp leg to a nearby zone edge (within the shift cap)
+      g_srTpSnapped=false;g_srSlShifted=false;   // per-arm telemetry reset
+      if(InpSRSnapTP)
+      {
+         double o1=t1,a1=SR_AdjustTP(dir,entry0,t1,atr2,1),a2=SR_AdjustTP(dir,entry0,t2,atr2,2),a3=SR_AdjustTP(dir,entry0,t3,atr2,3);
+         if(a1!=t1||a2!=t2||a3!=t3)
+         {
+            double netS=0;   // constraint 7: keep the snap only if the leg still passes its cost gate
+            if(NetProfitValid(dir,entry0,a1,lots,InpMinNetProfitTP1Money,netS)){t1=a1;t2=a2;t3=a3;g_srTpSnapped=true;}
+         }
+      }
    }
    else BuildThreeTargets(dir,pending,lots,w,hv,t1,t2,t3);
+   // [SR] entry gate before order dispatch for the complex branch as well
+   {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){why=srWhy2;return false;}}
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
    if(!InpSimpleScalpMode){
    if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";return;}
@@ -2236,7 +3004,15 @@ void TryArm()
    if(placed>0)
    {
       g_lastEntryTime=ServerNow();g_lastWindowEntry[w]=g_lastEntryTime;g_windowSignals[w]++;g_gateReason="ARMED "+WindowName(w)+(hv?" HV":"");
-      if(g_log!=INVALID_HANDLE)FileWrite(g_log,TimeToString(ServerNow(),TIME_DATE|TIME_SECONDS),"ARM",WindowName(w),dir,setup,DoubleToString(SpreadPoints(),1),DoubleToString(SpreadPercentile(),1),DoubleToString(ATRPercentile(),1),DoubleToString(g_volRatio,2),DoubleToString(risk,2),DoubleToString(t1,broker.digits),DoubleToString(t2,broker.digits),DoubleToString(t3,broker.digits));
+      if(g_log!=INVALID_HANDLE)
+      {
+         // [SR] appended columns: preserve the original 14-column order, add SR telemetry at the end
+         double srUp=0,srUpS=0,srUpD=0,srDn=0,srDnS=0,srDnD=0;string srMd=(InpUseSRZones?(InpSRMode==SR_ADVISORY?"ADV":(InpSRMode==SR_SOFT_FILTER?"SOFT":"HARD")):"OFF");
+         if(InpUseSRZones&&g_atr>0){double ne,fe,st;int ix;double srx=(dir>0?Ask():Bid());
+            if(SR_NearestAbove(srx,InpSRMinStrengthToUse,ne,fe,st,ix)){srUp=ne;srUpS=st;srUpD=MathAbs(ne-srx)/g_atr;}
+            if(SR_NearestBelow(srx,InpSRMinStrengthToUse,ne,fe,st,ix)){srDn=ne;srDnS=st;srDnD=MathAbs(srx-ne)/g_atr;}}
+         FileWrite(g_log,TimeToString(ServerNow(),TIME_DATE|TIME_SECONDS),"ARM",WindowName(w),dir,setup,DoubleToString(SpreadPoints(),1),DoubleToString(SpreadPercentile(),1),DoubleToString(ATRPercentile(),1),DoubleToString(g_volRatio,2),DoubleToString(risk,2),DoubleToString(t1,broker.digits),DoubleToString(t2,broker.digits),DoubleToString(t3,broker.digits),srMd,IntegerToString(g_srCount),DoubleToString(srUp,broker.digits),DoubleToString(srUpS,2),DoubleToString(srUpD,2),DoubleToString(srDn,broker.digits),DoubleToString(srDnS,2),DoubleToString(srDnD,2),(g_srTpSnapped?"1":"0"),(g_srSlShifted?"1":"0"),g_srBlockReason);
+      }
    }
 }
 
@@ -2354,6 +3130,10 @@ void ManagePosition(ulong ticket)
       if(InpUseTP3StructureTrail)
       {
          curSL=PositionGetDouble(POSITION_SL);double nowp=(dir>0?Bid():Ask());double candidate=(dir>0?nowp-InpTP3TrailATR*g_atr:nowp+InpTP3TrailATR*g_atr);double structural=(dir>0?g_swingLow-InpSLStructureBufferATR*g_atr:g_swingHigh+InpSLStructureBufferATR*g_atr);
+         // [SR] zone-based trail anchor joins as an additional candidate; the more
+         // conservative (closer-to-price in the profitable direction) one wins
+         double srAnchor=SR_TrailAnchor(dir,g_atr);
+         if(srAnchor>0)candidate=(dir>0?MathMax(candidate,srAnchor):MathMin(candidate,srAnchor));
          if(structural>0)candidate=(dir>0?MathMax(candidate,structural):MathMin(candidate,structural));candidate=PriceNorm(candidate);
          bool improve=(dir>0?(candidate>curSL+InpTP3TrailStepATR*g_atr):(curSL==0||candidate<curSL-InpTP3TrailStepATR*g_atr));bool valid=(dir>0?(Bid()-candidate>=MinTradeDistance()):(candidate-Ask()>=MinTradeDistance()));if(improve&&valid)ModifyPositionSafe(ticket,candidate,g_ps[idx].tp3);
       }
@@ -2626,7 +3406,7 @@ void LoadState()
 void OpenLog()
 {
    if(!InpUseLogFile)return;string n="PAT101_"+eaSymbol+"_"+TimeToString(ServerNow(),TIME_DATE)+".csv";StringReplace(n,".","-");StringReplace(n,":","-");
-   g_log=FileOpen(n,FILE_CSV|FILE_READ|FILE_WRITE|FILE_SHARE_READ|FILE_COMMON,';');if(g_log==INVALID_HANDLE)return;if(FileSize(g_log)==0)FileWrite(g_log,"server_time","event","window","dir","setup","spread_pts","spread_pct","atr_pct","vol_ratio","risk_money","tp1","tp2","tp3");FileSeek(g_log,0,SEEK_END);
+   g_log=FileOpen(n,FILE_CSV|FILE_READ|FILE_WRITE|FILE_SHARE_READ|FILE_COMMON,';');if(g_log==INVALID_HANDLE)return;if(FileSize(g_log)==0)FileWrite(g_log,"server_time","event","window","dir","setup","spread_pts","spread_pct","atr_pct","vol_ratio","risk_money","tp1","tp2","tp3","sr_mode","sr_zone_count","sr_up_price","sr_up_strength","sr_up_dist_atr","sr_dn_price","sr_dn_strength","sr_dn_dist_atr","sr_tp_snapped","sr_sl_shifted","sr_block_reason");FileSeek(g_log,0,SEEK_END);
 }
 
 void PrintSummary()
@@ -2993,6 +3773,11 @@ void DashUpdate(bool force=false)
    }
    DashRow("R_NEWS",1,yR,newsTxt,newsCol);
    DashRow("R_SLIP",1,yR,"Slip avg "+DoubleToString(g_slipAvg,1)+" last "+DoubleToString(g_lastSlipPts,1)+"pt",C_TXT2);
+   if(InpSRShowOnPanel)   // [SR] two rows inside the existing two-column layout; R had 3 spare rows
+   {
+      DashRow("R_SR1",1,yR,ClipText(SR_PanelLine1(),g_colW-16,g_font),(g_srBlockReason=="SR_OK"?C_TXT:C_DN_TXT));
+      DashRow("R_SR2",1,yR,ClipText(SR_PanelLine2(),g_colW-16,g_font),(g_srBlockReason=="SR_OK"?C_TXT2:C_WARN_TXT));
+   }
 
    // pause / resume button row
    if(!g_measure)
@@ -3068,6 +3853,7 @@ int OnInit()
    if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))Print("WARNING: Account forbids expert trading.");
    hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);hM5E20=iMA(eaSymbol,PERIOD_M5,20,0,MODE_EMA,PRICE_CLOSE);hM5E50=iMA(eaSymbol,PERIOD_M5,50,0,MODE_EMA,PRICE_CLOSE);hM5ADX=iADX(eaSymbol,PERIOD_M5,14);
    if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE||hM5E20==INVALID_HANDLE||hM5E50==INVALID_HANDLE||hM5ADX==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
+   if(!SR_Init()){Print("SR module initialization failed");return INIT_FAILED;}   // [SR]
    g_x=InpPanelX;g_y=InpPanelY;
    if(GlobalVariableCheck("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)))
    {int sx=(int)GlobalVariableGet("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber));
@@ -3098,13 +3884,14 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   SR_Deinit();   // [SR] remove every SR chart object before existing cleanup
    EventKillTimer();if(InpPersistState)SaveState();if(g_log!=INVALID_HANDLE){FileFlush(g_log);FileClose(g_log);g_log=INVALID_HANDLE;}WriteWindowReport();WritePerformanceReport();DashDestroy();
    if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);if(hM5E20!=INVALID_HANDLE)IndicatorRelease(hM5E20);if(hM5E50!=INVALID_HANDLE)IndicatorRelease(hM5E50);if(hM5ADX!=INVALID_HANDLE)IndicatorRelease(hM5ADX);PrintSummary();
 }
 
 void OnTick()
 {
-   RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();bool nb=IsNewBar();UpdateIndicators();RefreshFMPMacro(false);
+   RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();bool nb=IsNewBar();UpdateIndicators();RefreshFMPMacro(false);SR_Rebuild();   // [SR] throttled; before signal evaluation
    if(nb){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);
       // ultra-scalp v2 state
       double rsiBuf[1];if(CopyBuffer(hRSI,0,1,1,rsiBuf)>0)g_rsi=rsiBuf[0];
@@ -3134,7 +3921,7 @@ void OnTick()
 
 void OnTimer()
 {
-   RefreshServerOffset(false);CheckNews(false);RefreshFMPMacro(false);EnforceSwapFlat();if(InpCancelStalePendings)DeleteOwnPendings(true);DashUpdate(true);if(InpPersistState && (ServerNow()%30)==0)SaveState();
+   RefreshServerOffset(false);CheckNews(false);RefreshFMPMacro(false);EnforceSwapFlat();if(InpCancelStalePendings)DeleteOwnPendings(true);DashUpdate(true);SR_SelfTest();if(InpPersistState && (ServerNow()%30)==0)SaveState();
 }
 
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
