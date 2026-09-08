@@ -1,14 +1,14 @@
 InpSimpleScalpMode=true
 InpScalpMinMomentumATR=0.08
 InpTP1SpreadMultiple=2.0
-InpDailyLossPercent=2.5
+InpDailyLossPercent=2.0
 InpMaxFloatingDDPercent=3.0
 InpWeeklyLossLimit=6.0
 InpMonthlyLossLimit=10.0
 InpRiskPercent=0.35
 InpRiskStepDownOnDD=0.15
 InpMaxConsecutiveLosses=3
-InpMaxTradesPerDay=25
+InpMaxTradesPerDay=15
 InpAllowMinLotFallback=true
 InpMinLotMaxRiskPct=1.5
 InpMaxAggregateOpenRiskPct=2.5

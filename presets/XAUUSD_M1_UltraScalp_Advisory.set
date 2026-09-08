@@ -220,7 +220,7 @@ InpSoundResume="alert.wav"
 InpMagicNumber=20260911
 InpComment="Predict-A-Trade v4"
 InpUseSRZones=true
-InpSRMode=1
+InpSRMode=0
 InpSRRefreshSeconds=15
 InpSRRebuildOnNewHTFBar=true
 InpSR_TF1=PERIOD_M15    InpSR_BarsTF1 = 300

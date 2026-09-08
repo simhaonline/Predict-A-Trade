@@ -1,5 +1,6 @@
 InpSimpleScalpMode=true
 InpScalpMinMomentumATR=0.08
+InpTP1SpreadMultiple=2.0
 InpDailyLossPercent=2.5
 InpMaxFloatingDDPercent=3.0
 InpWeeklyLossLimit=6.0
@@ -26,8 +27,6 @@ InpMinNetProfitTP1Money=0.30
 InpMinNetProfitTP2Money=0.50
 InpMinNetProfitTP3Money=0.70
 InpOrderRetry=2
-InpMaxAverageSlippagePoints=15.0
-InpExtremeSlippagePoints=25.0
 InpMinRR_TP2=0.55
 InpMinRR_TP3=1.10
 InpExecutionMode=1
@@ -130,6 +129,8 @@ InpUseThreeTargets=true
 InpTP1Pct=0.75
 InpTP2Pct=0.20
 InpTP3Pct=0.05
+InpAutoDegradeTPLadder=true
+InpLadderRoundingMode=0
 InpSL_ATR_Multiplier=0.80
 InpSLStructureBufferATR=0.12
 InpTP1_ATR_Floor=0.25
@@ -184,6 +185,11 @@ InpRecoveryMinRR=1.50
 InpRecoveryCooldownSec=300
 InpRecoveryMaxAgeSec=600
 InpRecoveryMaxSpreadPts=30
+InpMaxAverageSlippagePoints=15.0
+InpExtremeSlippagePoints=25.0
+InpStopLevelBufferPoints=5
+InpRespectStopLevel=true
+InpValidateSymbolOnInit=true
 InpCloseOnExtremeSlippage=false
 InpSlippageCooldownMinutes=3
 InpAvoidSwap=true
@@ -217,10 +223,10 @@ InpUseSRZones=false
 InpSRMode=1
 InpSRRefreshSeconds=15
 InpSRRebuildOnNewHTFBar=true
-InpSR_TF1=15
-InpSR_TF2=16385
-InpSR_TF3=16388
-InpSR_TF4=16408
+InpSR_TF1=PERIOD_M15    InpSR_BarsTF1 = 300
+InpSR_TF2=PERIOD_H1     InpSR_BarsTF2 = 300
+InpSR_TF3=PERIOD_H4     InpSR_BarsTF3 = 240
+InpSR_TF4=PERIOD_D1     InpSR_BarsTF4 = 90
 InpSR_BarsTF1=300
 InpSR_BarsTF2=300
 InpSR_BarsTF3=240

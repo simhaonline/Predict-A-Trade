@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| Predict-A-Trade.mq5                                              |
+//| Predict-A-Trade-Ultra.mq5                                        |
 //| Production-oriented XAUUSD M1 intraday / ultra-scalping EA       |
 //| Session Overlap + High-Volatility Opportunity Engine             |
 //| Copyright 2026 Predict-A-Trade | Simha FinTech LLC, Dubai, UAE   |
@@ -22,7 +22,7 @@
 //| "feel" safer can simply select a lucky historical sample.        |
 //+------------------------------------------------------------------+
 #property copyright "Predict-A-Trade | Simha FinTech LLC"
-#property version   "1.00"
+#property version   "2.00"
 #property description "XAUUSD M1 four-session + overlap/HV ultra-scalper. Pure MQL5: native OrderSend (no includes, no CTrade). FMP stable macro adapter with obfuscated credentials, MQL5 calendar news gate, TP1/TP2/TP3 ladder with R:R validation, reversal loss-recovery leg, broker/account telemetry and a two-column control dashboard (click header to collapse, F key to pause arming)."
 
 //====================================================================
@@ -36,6 +36,7 @@ enum ENUM_VWAP_ANCHOR     { VWAP_BROKER_DAY=0, VWAP_LONDON=1, VWAP_NEWYORK=2 };
 enum ENUM_BREAKER_ACTION  { BREAKER_BLOCK_ONLY=0, BREAKER_CLOSE_ALL=1 };
 enum ENUM_HV_MODE         { HV_OFF=0, HV_AUTO=1, HV_FORCE_GATED=2 };
 enum ENUM_SR_MODE         { SR_ADVISORY=0, SR_SOFT_FILTER=1, SR_HARD_FILTER=2 };
+enum ENUM_LADDER_MODE     { LADDER_FAVOR_TP1=0, LADDER_FAVOR_RUNNER=1, LADDER_PROPORTIONAL=2 };
 enum ENUM_SR_SRC
 {
    SRSRC_PIVOT    = 1,
@@ -71,6 +72,7 @@ enum ENUM_WINDOW_ID
 input group "=== ULTRA-SCALP MODE (SIMPLIFIED ENGINE) ==="
 input bool   InpSimpleScalpMode           = true;      // TRUE = simple M1 scalp engine (recommended); false = full multi-filter engine
 input double InpScalpMinMomentumATR       = 0.08;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
+input double InpTP1SpreadMultiple         = 2.0;       // Phase 2.4: TP1 must exceed (spread+slippage) x this multiple, else TP1_TOO_TIGHT
 
 input group "=== CAPITAL PROTECTION ==="
 input double InpDailyLossPercent          = 4.0;
@@ -217,6 +219,9 @@ input bool   InpUseThreeTargets           = true;
 input double InpTP1Pct                    = 0.70;      // 70% off at TP1: scalp banking, small runner
 input double InpTP2Pct                    = 0.20;
 input double InpTP3Pct                    = 0.10;
+// Phase 2.5: lot-ladder feasibility. Decimal fractions ONLY (0.75 = 75%), must sum to 1.0.
+input bool            InpAutoDegradeTPLadder = true;                // 3-leg -> 2-leg -> 1-leg when the position is too small
+input ENUM_LADDER_MODE InpLadderRoundingMode = LADDER_FAVOR_TP1;    // where rounding residue goes
 input double InpSL_ATR_Multiplier         = 0.90;      // was 1.25: tighter stop improves ladder R:R
 input double InpSLStructureBufferATR      = 0.15;
 input double InpTP1_ATR_Floor             = 0.30;
@@ -283,6 +288,9 @@ input double InpRecoveryMaxSpreadPts      = 35;        // tighter spread cap for
 input group "=== SLIPPAGE / SWAP PROTECTION ==="
 input double InpMaxAverageSlippagePoints  = 18.0;     // 18pt avg is realistic for gold ECN fills; 10 blocked every re-entry
 input double InpExtremeSlippagePoints     = 30.0;     // 30pt on gold = genuinely pathological fill; pre-trade guard covers spikes
+input int    InpStopLevelBufferPoints     = 5;        // Phase 2.4/4.1: safety buffer above broker stops/freeze level
+input bool   InpRespectStopLevel          = true;     // enforce stops/freeze distance on every SR/proposed price
+input bool   InpValidateSymbolOnInit      = true;     // fail fast when the symbol is not fully tradeable
 input bool   InpCloseOnExtremeSlippage    = false;     // optional emergency flatten after a pathological fill
 input int    InpSlippageCooldownMinutes   = 3;        // was 10: 10-min sit-outs after every SL fill = "no trades"
 input bool   InpAvoidSwap                 = true;
@@ -1176,6 +1184,11 @@ PositionState g_ps[];
 
 long g_serverOffsetSec=0;
 double g_ptScale=1.0;                    // point-unit auto-scale for 3-digit gold feeds
+//--- Phase 2.2: EFFECTIVE TP volume split (decimal fractions). Inputs are read-only in
+//--- MQL5, so a whole-number misconfiguration (75/20/5) is normalized here at init and
+//--- every volume allocation reads the *Eff globals instead of the raw inputs.
+double g_tp1PctEff=0.75,g_tp2PctEff=0.20,g_tp3PctEff=0.05;
+double InpTPPctSanitize(double v){ return (v>1.0?v/100.0:v); }
 datetime g_lastOffsetRefresh=0,g_lastBar=0,g_lastExitTime=0,g_lastEntryTime=0;
 // Simple-mode armed plan snapshot: TryArm() computes the scalp ladder (t1/t2/t3) before
 // the market order fills; OnTradeTransaction later reconstructs position state from the
@@ -1256,7 +1269,24 @@ double NormalizeVolume(double lots)
 }
 
 double PriceNorm(double p){ return NormalizeDouble(p,broker.digits); }
-double MinTradeDistance(){ return MathMax(broker.stopsLevel,broker.freezeLevel)*broker.point+2*broker.point; }
+double MinTradeDistance()
+{
+   double base=MathMax(broker.stopsLevel,broker.freezeLevel)*broker.point+2*broker.point;
+   // Phase 4.1: optionally add the safety buffer on top of broker stops/freeze level
+   if(InpRespectStopLevel)base+=InpStopLevelBufferPoints*broker.point;
+   return base;
+}
+
+//--- Phase 2.3: authoritative ultra-scalp constants (simple-mode engine).
+//--- These are the code equivalents of the complex-mode inputs:
+//---   SCALP_TP1_ATR ~ InpTP1_ATR_Floor/Cap midpoint, SCALP_SL_ATR ~ InpSL_ATR_Multiplier.
+//--- Distance = ATR multiple (volatility-adjusted); volume split = decimal fraction (Phase 2.1).
+const double SCALP_TP1_ATR   = 0.40;   // TP1 distance (complex-mode analogue: InpTP1_ATR_Floor 0.25..Cap 0.40)
+const double SCALP_TP2_TOT   = 0.75;   // TP2 distance from entry (InpTP2_ATR_Floor 0.60..Cap 1.10)
+const double SCALP_TP3_TOT   = 1.15;   // TP3 distance from entry (InpTP3_ATR_Floor 1.00..Cap 1.80)
+const double SCALP_SL_ATR    = 0.80;   // trend-pullback / momentum stop (InpSL_ATR_Multiplier)
+const double SCALP_SL_REV    = 0.45;   // VWAP-reversion stop beyond the extreme
+const double SCALP_SL_BRK    = 0.85;   // London-breakout stop
 
 double Bid(){ return SymbolInfoDouble(eaSymbol,SYMBOL_BID); }
 double Ask(){ return SymbolInfoDouble(eaSymbol,SYMBOL_ASK); }
@@ -2501,9 +2531,9 @@ double NearestLiquidityTarget(int dir,double entry,int lookback,double fallback)
    return (best>0?best:fallback);
 }
 
-//--- Signal-aware SL/TP for the ultra-scalp engine:
-//--- trend-pullback: SL = 0.90 ATR (invalidation), TP1 = 0.45 ATR (1.2R effective)
-//--- mean-reversion: SL = beyond last bar extreme + 0.5 ATR (noise-proof),
+//--- Signal-aware SL/TP for the ultra-scalp engine (Phase 2 profile; see SCALP_* constants):
+//--- trend-pullback: SL = 0.80 ATR (invalidation), TP1 = 0.40 ATR (0.50R)
+//--- mean-reversion: SL = beyond last bar extreme + 0.45 ATR (noise-proof),
 //---                 TP1 = VWAP (the mean) - the highest-probability target
 double ScalpStopDistance(int dir,double entry,double &slPrice)
 {
@@ -2511,11 +2541,11 @@ double ScalpStopDistance(int dir,double entry,double &slPrice)
    if(g_scalpSignal==2||g_scalpSignal==-2)   // VWAP reversion: beyond the extreme + 0.45 ATR
    {
       double ext=(dir>0?iLow(eaSymbol,PERIOD_M1,1):iHigh(eaSymbol,PERIOD_M1,1));
-      slPrice=PriceNorm(ext-dir*0.45*atr);
+      slPrice=PriceNorm(ext-dir*SCALP_SL_REV*atr);
    }
    else if(g_scalpSignal==3||g_scalpSignal==-3)  // London breakout: 0.85 ATR stop
-      slPrice=PriceNorm(entry-dir*0.85*atr);
-   else slPrice=PriceNorm(entry-dir*0.80*atr);   // NY momentum / EMA pullback
+      slPrice=PriceNorm(entry-dir*SCALP_SL_BRK*atr);
+   else slPrice=PriceNorm(entry-dir*SCALP_SL_ATR*atr);   // NY momentum / EMA pullback
    double d=MathAbs(entry-slPrice);
    double md=MinTradeDistance();
    if(d<md){d=md;slPrice=PriceNorm(entry-dir*d);}
@@ -2532,7 +2562,7 @@ double ScalpTarget1(int dir,double entry)
       return PriceNorm(entry+dir*d);
    }
    // breakout/momentum/pullback: fixed ~2R-style via 0.40 ATR (stop is 0.80-0.85 ATR)
-   return PriceNorm(entry+dir*0.40*atr);
+   return PriceNorm(entry+dir*SCALP_TP1_ATR*atr);
 }
 
 double ComputeSL(int dir,double entry)
@@ -2591,9 +2621,9 @@ void BuildThreeTargets(int dir,double entry,double lots,ENUM_WINDOW_ID w,bool hv
    // (60/25/15 split of the ladder). Validating on full 'lots' was too lenient: a leg
    // closing 15% of the position earns 15% of the gross but pays commission on it too,
    // and the spread cost is only saved on that fraction.
-   double sumPct=MathMax(0.0001,InpTP1Pct+InpTP2Pct+InpTP3Pct);
-   double v1=FloorVolume(lots*InpTP1Pct/sumPct);
-   double v2=FloorVolume(lots*InpTP2Pct/sumPct);
+   double sumPct=MathMax(0.0001,g_tp1PctEff+g_tp2PctEff+g_tp3PctEff);
+   double v1=FloorVolume(lots*g_tp1PctEff/sumPct);
+   double v2=FloorVolume(lots*g_tp2PctEff/sumPct);
    double v3=FloorVolume(lots-v1-v2);
    if(v1<broker.volumeMin)v1=lots;                       // collapse: single leg carries all
    if(v2<broker.volumeMin)v2=(v3<broker.volumeMin?0:lots-v1);
@@ -2618,13 +2648,27 @@ bool RRValid(int dir,double entry,double sl,double target,double minRR)
 
 void AllocateVolumes(double total,double &v1,double &v2,double &v3)
 {
-   v1=v2=v3=0;double sum=MathMax(0.0001,InpTP1Pct+InpTP2Pct+InpTP3Pct);double minv=broker.volumeMin;
-   v1=FloorVolume(total*InpTP1Pct/sum);v2=FloorVolume(total*InpTP2Pct/sum);v3=FloorVolume(total-v1-v2);
+   v1=v2=v3=0;double sum=MathMax(0.0001,g_tp1PctEff+g_tp2PctEff+g_tp3PctEff);double minv=broker.volumeMin;
+   v1=FloorVolume(total*g_tp1PctEff/sum);v2=FloorVolume(total*g_tp2PctEff/sum);v3=FloorVolume(total-v1-v2);
    if(v3<=0){v3=0;v2=FloorVolume(total-v1);}if(v2<=0){v2=0;v1=total;}
    // If three legs cannot satisfy broker minimum, intelligently collapse to two/one leg.
    int valid=(v1>=minv?1:0)+(v2>=minv?1:0)+(v3>=minv?1:0);
-   if(valid<3 && total<3*minv-1e-12){v3=0;v1=FloorVolume(total*0.60);v2=FloorVolume(total-v1);if(v2<minv){v1=total;v2=0;}}
-   double used=v1+v2+v3;double rem=FloorVolume(total-used);if(rem>0)v1=FloorVolume(v1+rem);
+   // Phase 2.5 ladder feasibility: every leg >= volMin AND every residual after a
+   // partial close also >= volMin (a broker rejects a close leaving a sub-min remainder).
+   // Degradation cascade 3-leg -> 2-leg -> 1-leg, governed by InpAutoDegradeTPLadder;
+   // InpLadderRoundingMode decides where the FloorVolume residue lands.
+   if(!InpAutoDegradeTPLadder&&valid<3&&total>=minv){v1=total;v2=0;v3=0;return;}   // legacy single-leg fallback
+   if(valid<3&&total<3*minv-1e-12)
+   {
+      if(total>=2*minv){v3=0;v1=FloorVolume(total*g_tp1PctEff/(g_tp1PctEff+g_tp2PctEff));v2=FloorVolume(total-v1);}
+      else{v3=0;v2=0;v1=total;}
+      if(v2<minv){v2=0;v1=total;}
+      if(v1<minv){v1=0;}   // below one min lot the ladder is infeasible; caller rejects
+      return;
+   }
+   if(InpLadderRoundingMode==LADDER_FAVOR_TP1){double rem=FloorVolume(total-v1-v2-v3);if(rem>=minv)v1=FloorVolume(v1+rem);}
+   else if(InpLadderRoundingMode==LADDER_FAVOR_RUNNER&&v3>0){double rem=FloorVolume(total-v1-v2-v3);if(rem>=minv)v3=FloorVolume(v3+rem);}
+   double used=v1+v2+v3;double rem2=FloorVolume(total-used);if(rem2>0)v1=FloorVolume(v1+rem2);
    if(v1<=0){v1=total;v2=v3=0;}
 }//====================================================================
 // SETUP / ENTRY GATING
@@ -2946,7 +2990,7 @@ void TryArm()
       // single-target scalp: TP2/TP3 trail beyond for the runner
       // (0.40 total / 0.75 total / 1.15 total ATR - authoritative profile)
       double atr2=MathMax(g_atr,MinTradeDistance());
-      t2=PriceNorm(entry0+dir*0.75*atr2);t3=PriceNorm(entry0+dir*1.15*atr2);
+      t2=PriceNorm(entry0+dir*SCALP_TP2_TOT*atr2);t3=PriceNorm(entry0+dir*SCALP_TP3_TOT*atr2);
       // [SR] snap each scalp leg to a nearby zone edge (within the shift cap)
       g_srTpSnapped=false;g_srSlShifted=false;   // per-arm telemetry reset
       if(InpSRSnapTP)
@@ -2967,6 +3011,14 @@ void TryArm()
    if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";return;}
    if(!RRValid(dir,pending,sl,t3,InpMinRR_TP3)){g_gateReason="TP3 R:R below floor";return;}}
    double net1=0;if(!NetProfitValid(dir,pending,t1,lots,InpMinNetProfitTP1Money,net1)){g_gateReason="TP1 not cost-positive";return;}
+   // Phase 2.4: TP1 minimum-viability (spread-aware). If the ATR-derived TP1 is closer
+   // than stops-level+buffer or (spread+expectedSlip) x InpTP1SpreadMultiple, REJECT the
+   // trade - never silently widen TP1 beyond its cap.
+   {
+      double minTP1=MathMax(broker.stopsLevel*broker.point+InpStopLevelBufferPoints*broker.point,
+                            (SpreadPoints()+ExpectedSlippagePoints())*broker.point*InpTP1SpreadMultiple);
+      if(g_atr>0&&MathAbs(t1-entry0)<minTP1){g_gateReason="TP1_TOO_TIGHT";return;}
+   }
    int layers=(directional?1:MathMax(1,MathMin(3,InpStraddleLayers)));if(hv&&InpAB_EnableHighVol)layers=MathMin(2,layers+1);
    // Ultra-scalp mode: always a single MARKET order - pendings/straddles add latency
    // and complexity that a scalp does not need.
@@ -3847,6 +3899,28 @@ void DashDestroy(){ObjectsDeleteAll(0,UI_PREFIX,0,-1);}
 int OnInit()
 {
    eaSymbol=_Symbol;if(!InitBroker()){Print("Broker symbol properties unavailable");return INIT_FAILED;}
+   // Phase 2.2: Pct inputs are DECIMAL FRACTIONS (0.75 = 75%). Hard-guard misconfiguration.
+   if(InpTP1Pct>1.0||InpTP2Pct>1.0||InpTP3Pct>1.0)
+   {
+      bool allWhole=(InpTP1Pct>1.0&&InpTP1Pct<=100.0&&InpTP2Pct>1.0&&InpTP2Pct<=100.0&&InpTP3Pct>1.0&&InpTP3Pct<=100.0);
+      double sumW=InpTP1Pct+InpTP2Pct+InpTP3Pct;
+      if(allWhole&&MathAbs(sumW-100.0)<=0.5)
+      {
+         Print("WARNING: TP volume percents given as whole numbers (sum=",DoubleToString(sumW,1),"%) - auto-dividing by 100. Prefer decimal fractions (0.75/0.20/0.05).");
+         // inputs are const in MQL5; normalize the EFFECTIVE split used by AllocateVolumes via globals
+         g_tp1PctEff=InpTP1Pct/100.0;g_tp2PctEff=InpTP2Pct/100.0;g_tp3PctEff=InpTP3Pct/100.0;
+      }
+      else{Print("INIT FAILED: InpTP1Pct/2/3 must be decimal fractions summing to 1.0 (e.g. 0.75/0.20/0.05). Got ",DoubleToString(InpTP1Pct,3),"/",DoubleToString(InpTP2Pct,3),"/",DoubleToString(InpTP3Pct,3),".");return INIT_PARAMETERS_INCORRECT;}
+   }
+   else
+   {
+      if(MathAbs(InpTP1Pct+InpTP2Pct+InpTP3Pct-1.0)>0.001){Print("INIT FAILED: InpTP1Pct+InpTP2Pct+InpTP3Pct must equal 1.0 (got ",DoubleToString(InpTP1Pct+InpTP2Pct+InpTP3Pct,4),").");return INIT_PARAMETERS_INCORRECT;}
+      if(InpUseThreeTargets&&(InpTP1Pct<=0||InpTP2Pct<=0||InpTP3Pct<=0)){Print("INIT FAILED: all TP Pct values must be > 0 when InpUseThreeTargets=true.");return INIT_PARAMETERS_INCORRECT;}
+      g_tp1PctEff=InpTPPctSanitize(InpTP1Pct);g_tp2PctEff=InpTPPctSanitize(InpTP2Pct);g_tp3PctEff=InpTPPctSanitize(InpTP3Pct);
+   }
+   // Phase 4.1: symbol must be fully tradeable
+   if(InpValidateSymbolOnInit&&(ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_MODE)!=SYMBOL_TRADE_MODE_FULL)
+   {Print("INIT FAILED: symbol ",eaSymbol," is not SYMBOL_TRADE_MODE_FULL (closed/close-only).");return INIT_FAILED;}
    // Fail-loud permission diagnosis (no silent "compiles but never trades").
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))Print("WARNING: AutoTrading is OFF - enable the Algo Trading button to allow entries.");
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))Print("WARNING: MQL trade permission denied - check Allow Algo Trading in EA settings.");
