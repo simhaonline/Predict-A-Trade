@@ -74,7 +74,7 @@ input bool   InpNoAveragingDown           = true;      // invariant; never add t
 input group "=== BROKER / COST MODEL ==="
 input int    InpMaxSpreadPoints           = 45;      // hard cap; Xelans ECN gold runs 35-45pt
 input double InpSpreadSpikeRatio          = 2.50;
-input double InpMaxSpreadPercentile       = 85.0;
+input double InpMaxSpreadPercentile       = 92.0;     // p85 was below this broker's normal spread range
 input int    InpMaxSlippagePoints         = 30;
 input double InpCommissionPerLotRTFallback= 7.00;      // account-currency round trip / lot fallback
 input double InpExpectedSlipPtsFallback   = 4.0;
@@ -221,7 +221,7 @@ input int    InpNewsBufferMinutes         = 10;     // was 15: 15+stabilize froz
 input int    InpNewsLookaheadMin          = 120;
 input int    InpPostNewsStabilizeMinutes  = 5;
 input double InpDisorderSpreadPct         = 95.0;
-input double InpMaxChaseCandleATR         = 1.80;
+input double InpMaxChaseCandleATR         = 2.60;     // gold M1 displacement 2+ ATR is normal momentum, not a chase
 input double InpMaxEntryVWAPDeviationATR  = 2.20;
 input double InpDisorderSlipPts           = 20.0;
 input int    InpDisorderCooldownMinutes   = 5;
@@ -241,7 +241,7 @@ input int    InpMacroMomentumBars         = 6;
 input bool   InpUseEURUSD                 = true;
 input string InpEURUSDSymbol              = "";        // blank = auto-detect broker EURUSD including suffix/prefix
 input double InpEURUSDMinMovePct          = 0.020;
-input int    InpMacroMinConfluence        = 1;         // aligned USD-basket/EUR/SPX votes required vs opposing
+input int    InpMacroMinConfluence        = 0;        // 0 = macro is advisory (FMP down must not veto entries)         // aligned USD-basket/EUR/SPX votes required vs opposing
 input bool   InpRequireExternalData       = false;     // true blocks entry until a macro feed is available
 
 input group "=== IFVG / PROPULSION BLOCK (PTB) ==="
@@ -263,7 +263,7 @@ input int    InpRecoveryMaxAgeSec         = 900;       // recovery opportunity e
 input double InpRecoveryMaxSpreadPts      = 35;        // tighter spread cap for recovery entries
 
 input group "=== SLIPPAGE / SWAP PROTECTION ==="
-input double InpMaxAverageSlippagePoints  = 10.0;
+input double InpMaxAverageSlippagePoints  = 18.0;     // 18pt avg is realistic for gold ECN fills; 10 blocked every re-entry
 input double InpExtremeSlippagePoints     = 30.0;     // 30pt on gold = genuinely pathological fill; pre-trade guard covers spikes
 input bool   InpCloseOnExtremeSlippage    = false;     // optional emergency flatten after a pathological fill
 input int    InpSlippageCooldownMinutes   = 3;        // was 10: 10-min sit-outs after every SL fill = "no trades"
@@ -1645,7 +1645,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    //  - last single fill was extreme -> stand aside for the cooldown
    //  - current spread alone already eats the extreme-slippage budget -> stand aside
    if(g_lastSlipPts>=InpExtremeSlippagePoints&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";return false;}
-   if(SpreadPoints()>=InpExtremeSlippagePoints*g_ptScale){why="spread at extreme-slippage level";return false;}
+   if(SpreadPoints()>=(InpMaxSpreadPoints+20)*g_ptScale){why="spread extreme";return false;}   // > hard cap+20 = broken feed, not normal ECN spread
    if(!ExternalDataReady(why))return false;
    double sp=SpreadPoints(),spp=SpreadPercentile();if(sp>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";return false;}if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
    double atrPts=(broker.point>0?g_atr/broker.point:0);if(atrPts<InpMinATRPoints*g_ptScale){why="ATR chop";return false;}if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
