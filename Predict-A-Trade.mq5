@@ -1073,12 +1073,12 @@ void RefreshFMPMacro(bool force=false)
       return;
    }
    datetime now=ServerNow();
-   // Rate-limit defense (HTTP 429): base cycle 600s, doubled on 429 up to 3600s.
-   int effSec=InpFMPRefreshSec*60;
-   if(g_fmp429Count>0)effSec=(int)MathMin(3600,MathPow(2,MathMin(6,g_fmp429Count))*60);
+   // Rate-limit defense (HTTP 429): base cycle 600s, doubled per consecutive 429 up to 1h.
+   int effSec=InpFMPRefreshSec;                       // input is in SECONDS
+   if(g_fmp429Count>0)effSec=(int)MathMin(3600,600.0*MathPow(2,MathMin(3,g_fmp429Count)));
    if(!force && g_fmpLastTry>0 && now-g_fmpLastTry<effSec)return;
    g_fmpLastTry=now;
-   bool doNews=(g_fmpCycle%2==0);   // news every 2nd cycle: halves request count
+   bool doNews=(g_fmpCycle%3==0);   // news every 3rd cycle: keeps daily total under the free-plan quota
 
    // ONE batch request for the whole USD basket (+SPX) - free-plan friendly.
    string syms[FMPUSD_COUNT+1];
@@ -1096,7 +1096,12 @@ void RefreshFMPMacro(bool force=false)
    for(int i=0;i<FMPUSD_COUNT;i++)if(g_usdGot[i])okCount++;
    g_usdAvailable=(okCount>=(FMPUSD_COUNT-2));       // tolerate up to 2 dead pairs
    if(!g_usdAvailable && g_fmpEverOK==false && g_fmpErrCount==1)
-      Print("FMP feed unavailable: ",g_fmpLastErr," | check Tools>Options>Expert Advisors>Allow WebRequest for https://financialmodelingprep.com");
+   {
+      if(StringFind(g_fmpLastErr,"429")>=0)
+         Print("FMP quota exhausted (HTTP 429): free plan allows ~250 requests/day. The EA now polls once per ",effSec,"s with batched requests (~180/day) and will recover automatically when the quota resets.");
+      else
+         Print("FMP feed unavailable: ",g_fmpLastErr," | check Tools>Options>Expert Advisors>Allow WebRequest for https://financialmodelingprep.com");
+   }
    if(g_usdAvailable)
    {
       double sum=0;int n=0;
