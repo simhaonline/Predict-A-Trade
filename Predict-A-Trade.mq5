@@ -1789,7 +1789,8 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       // Higher-timeframe agreement: M1 scalps counter to the H1 trend are the exact
       // pattern that produced the screenshot's stacked losing buys.
       bool htfUp=(g_m15e20>g_m15e50);
-      if((dir>0&&!htfUp)||(dir<0&&htfUp)){why="HTF (M15) disagrees";return false;}
+      bool htfFlat=(g_m15e20>0&&g_m15e50>0&&MathAbs(g_m15e20-g_m15e50)<=0.15*MathMax(g_atr,MinTradeDistance()));
+      if(!htfFlat&&((dir>0&&!htfUp)||(dir<0&&htfUp))){why="HTF (M15) disagrees";return false;}
       // Anti-stacking: no second scalp in the same direction within 60s OR within
       // 0.35*ATR of an open same-direction entry. Three identical buys in 3 seconds
       // tripled the screenshot's loss.
@@ -1998,7 +1999,20 @@ void TryArm()
    if(InpCancelStalePendings)DeleteOwnPendings(true);if(CountOwnPendings()>0)return;if(!InpArmWhileInTrade&&CountOwnPositions()>0)return;
    // EXEC_STRADDLE arms stop orders ahead of price; EXEC_DIRECTIONAL fires a market
    // order at signal time; EXEC_AUTO picks directional only in verified HV windows.
-   int dir=(g_dirBias>0?1:-1);ENUM_WINDOW_ID w;bool hv=false;string setup,why;if(!CanEnter(dir,w,hv,setup,why)){g_gateReason=why;return;}
+   int dir;
+   if(InpSimpleScalpMode)
+   {
+      // Direction comes from the scalp engine itself: score BOTH sides, trade the
+      // stronger (ties -> EMA20 side). The 14-filter bias must not veto scalp setups.
+      int up=ScalpScore(1),dn=ScalpScore(-1);
+      if(up>=InpScalpMinScore&&up>dn)dir=1;
+      else if(dn>=InpScalpMinScore&&dn>up)dir=-1;
+      else if(up>=InpScalpMinScore)dir=1;
+      else if(dn>=InpScalpMinScore)dir=-1;
+      else{g_gateReason="scalp votes 0/5";return;}
+   }
+   else dir=(g_dirBias>0?1:-1);
+   ENUM_WINDOW_ID w;bool hv=false;string setup,why;if(!CanEnter(dir,w,hv,setup,why)){g_gateReason=why;return;}
    bool directional=(InpExecutionMode==EXEC_DIRECTIONAL||(InpExecutionMode==EXEC_AUTO&&w==WIN_VERIFIED_EXPANSION));
    double entry0=(dir>0?Ask():Bid());double atr=MathMax(g_atr,MinTradeDistance());
    double dist;
