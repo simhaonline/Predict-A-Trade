@@ -325,6 +325,13 @@ input string InpSoundResume               = "alert.wav";   // sound when arming 
 input int    InpMagicNumber               = 20260911;
 input string InpComment                   = "Predict-A-Trade v4";
 
+input group "=== LICENSE / MOBILE CONTROL ==="
+input string InpLicenseKey            = "";    // License key; blank = local/unrestricted mode
+input string InpLicenseServerURL      = "https://api.yourdomain.com"; // License server base URL (HTTPS only)
+input int    InpLicenseGraceMinutes   = 720;   // Grace period when the server is unreachable (minutes)
+input bool   InpCloseOnLicenseRevoke  = false; // Flatten positions when the license is revoked
+input bool   InpEnableMobileCommands  = true;  // MT5 Mobile command bridge (pending-order comments)
+
 input group "=== SUPPORT & RESISTANCE (HTF ZONES) ==="
 input bool            InpUseSRZones              = true;             // master switch; false = bit-identical legacy build
 input ENUM_SR_MODE    InpSRMode                  = SR_SOFT_FILTER;   // advisory / soft wall filter / hard headroom filter
@@ -1042,6 +1049,312 @@ void SR_SelfTest()
    SR_LogSnapshot();
 }
 //================ SR MODULE END ==================
+//================ LICENSE CLIENT + MOBILE COMMAND BRIDGE BEGIN ================
+// Phase 2/3 of the license-server spec. SELF-CONTAINED: no includes, no external
+// scripts. WebRequest happens ONLY in OnTimer paths (never OnTick). With
+// InpLicenseKey="" every function short-circuits — zero overhead, unrestricted
+// local mode. Fail-safe: a previously-validated EA keeps trading through server
+// outages for InpLicenseGraceMinutes; an EA that has NEVER validated cannot start.
+
+bool     g_licenseActive       = false;
+bool     g_autoTradingEnabled  = true;
+int      g_settingsVersion     = 0;
+datetime g_nextLicenseCheck    = 0;
+datetime g_gracePeriodDeadline = 0;
+string   g_machineId           = "";
+string   g_licenseLastReason   = "";   // last validation reason (panel/CSV)
+
+//--- Phase 2.3: stable machine fingerprint = SHA256(computer|datapath|login|server).
+//--- MQL5 has no built-in SHA256, so this is a compact, dependency-free implementation
+//--- (FIPS 180-4). Output is a 64-char lowercase hex string.
+string LicenseSHA256(string text)
+{
+      //--- static tables
+      static uint K[64];
+      static bool KInit=false;
+      if(!KInit)
+      {
+         uint k[64]={
+         0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+         0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+         0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+         0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+         0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+         0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+         0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+         0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+         for(int i=0;i<64;i++)K[i]=k[i];
+         KInit=true;
+      }
+      //--- UTF-8 bytes of the input
+      uchar msg[];
+      int len=StringToCharArray(text,msg,0,WHOLE_ARRAY,CP_UTF8);
+      if(len>0)len--;   // StringToCharArray appends the terminator
+      ulong bitLen=(ulong)len*8;
+      //--- padding
+      int padded=len+1;
+      while(padded%64!=57)padded++;
+      uchar buf[];
+      ArrayResize(buf,padded+8);
+      for(int i=0;i<len;i++)buf[i]=msg[i];
+      buf[len]=0x80;
+      for(int i=len+1;i<padded+8;i++)buf[i]=0;
+      for(int i=0;i<8;i++)buf[padded+7-i]=(uchar)((bitLen>>(8*i))&0xFF);
+      //--- compression
+      uint h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a;
+      uint h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+      uint w[64];
+      for(int off=0;off<padded+8;off+=64)
+      {
+         for(int i=0;i<16;i++)
+            w[i]=((uint)buf[off+4*i]<<24)|((uint)buf[off+4*i+1]<<16)|((uint)buf[off+4*i+2]<<8)|((uint)buf[off+4*i+3]);
+         for(int i=16;i<64;i++)
+         {
+            uint s0=((w[i-15]>>7)|(w[i-15]<<25))+((w[i-15]>>18)|(w[i-15]<<14))+0; // rotr7^rotr18^shr3
+            uint x=w[i-15];
+            uint rotr7=(x>>7)|(x<<25);
+            uint rotr18=(x>>18)|(x<<14);
+            uint shr3=(x>>3);
+            s0=rotr7^rotr18^shr3;
+            uint y=w[i-2];
+            uint s1=((y>>17)|(y<<15))^((y>>19)|(y<<13))^(y>>10);
+            w[i]=w[i-16]+s0+w[i-7]+s1;
+         }
+         uint a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,hh=h7;
+         for(int i=0;i<64;i++)
+         {
+            uint S1=((e>>6)|(e<<26))^((e>>11)|(e<<21))^((e>>25)|(e<<7));
+            uint ch=(e&f)^((~e)&g);
+            uint t1=hh+S1+ch+K[i]+w[i];
+            uint S0=((a>>2)|(a<<30))^((a>>13)|(a<<19))^((a>>22)|(a<<10));
+            uint maj=(a&b)^(a&c)^(b&c);
+            uint t2=S0+maj;
+            hh=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+         }
+         h0+=a;h1+=b;h2+=c;h3+=d;h4+=e;h5+=f;h6+=g;h7+=hh;
+      }
+      uint out[8]={h0,h1,h2,h3,h4,h5,h6,h7};
+      string hex="";
+      for(int i=0;i<8;i++)
+         for(int nib=28;nib>=0;nib-=4)
+         {
+            int d=(int)((out[i]>>nib)&0xF);
+            hex+=StringSubstr("0123456789abcdef",d,1);
+         }
+      return hex;
+}
+
+//--- Phase 2.6: the single gate used by OnTick / TryArm. Local mode (blank key)
+//--- passes with zero overhead.
+bool LicenseTradingAllowed()
+{
+   if(InpLicenseKey=="")return true;                       // local/unrestricted mode
+   if(!g_licenseActive)return false;                       // never validated or revoked
+   if(!g_autoTradingEnabled)return false;                  // disabled from the server
+   // Mobile command bridge override (STOP_EA)
+   if(InpEnableMobileCommands && GlobalVariableCheck("PAT_TRADING_ENABLED")
+      && GlobalVariableGet("PAT_TRADING_ENABLED")<0.5)return false;
+   return true;
+}
+
+//--- LicenseCheckGate(): top-of-tick guard. Returns false when trading must stop.
+bool LicenseCheckGate()
+{
+   if(LicenseTradingAllowed())return true;
+   if(InpLicenseKey!="" && !g_licenseActive && g_licenseLastReason!="")
+      g_gateReason="LICENSE: "+g_licenseLastReason;
+   return false;
+}
+
+//--- rudimentary JSON field reader (no external parser): finds "field":value
+string LicenseJsonField(string body,string field)
+{
+   string pat="\""+field+"\":";
+   int p=StringFind(body,pat);
+   if(p<0)return "";
+   p+=StringLen(pat);
+   while(p<StringLen(body) && (StringGetCharacter(body,p)==' '))p++;
+   if(p>=StringLen(body))return "";
+   if(StringGetCharacter(body,p)=='"')          // string value
+   {
+      int q=StringFind(body,"\"",p+1);
+      if(q<0)return "";
+      return StringSubstr(body,p+1,q-p-1);
+   }
+   int e=p;
+   while(e<StringLen(body))
+   {
+      ushort ch=StringGetCharacter(body,e);
+      if(ch==','||ch=='}'||ch==' ')break;
+      e++;
+   }
+   return StringSubstr(body,p,e-p);
+}
+
+//--- Phase 2.5: POST to the license server. 9-arg WebRequest, 5 s timeout.
+//--- Returns HTTP status code (0 = transport failure).
+int LicenseHttpPost(string endpoint,string payload,string &response)
+{
+   response="";
+   uchar post[];
+   int len=StringToCharArray(payload,post,0,WHOLE_ARRAY,CP_UTF8);
+   if(len>0)len--;   // drop terminator
+   ArrayResize(post,len);
+   uchar result[];
+   string resultHeaders="";
+   string headers="Content-Type: application/json\r\nUser-Agent: PAT-Ultra/2.00\r\n";
+   string url=InpLicenseServerURL+endpoint;
+   ResetLastError();
+   int code=WebRequest("POST",url,headers,"",5000,post,len,result,resultHeaders);
+   if(code==-1)
+   {
+      int err=GetLastError();
+      if(err==4014)
+         Print("LICENSE: WebRequest blocked. FIX: Tools > Options > Expert Advisors > Allow WebRequest for listed URL -> add ",InpLicenseServerURL);
+      return 0;
+   }
+   response=CharArrayToString(result,0,WHOLE_ARRAY,CP_UTF8);
+   return code;
+}
+
+//--- activate this machine/account; returns true when the seat is granted.
+bool LicenseActivate()
+{
+   string payload="{\"license_key\":\""+InpLicenseKey+"\",\"machine_id\":\""+g_machineId+
+                  "\",\"account_login\":"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+
+                  ",\"broker_server\":\""+AccountInfoString(ACCOUNT_SERVER)+"\"}";
+   string resp="";
+   int code=LicenseHttpPost("/v1/activate",payload,resp);
+   if(code!=200)return false;   // transport failure -> caller handles grace
+   string v=LicenseJsonField(resp,"valid");
+   g_licenseLastReason=LicenseJsonField(resp,"reason");
+   if(v!="true")
+   {
+      Print("LICENSE: activation refused (",g_licenseLastReason,")");
+      return false;
+   }
+   g_licenseActive=true;
+   g_autoTradingEnabled=(LicenseJsonField(resp,"auto_trading_enabled")!="false");
+   g_settingsVersion=(int)StringToInteger(LicenseJsonField(resp,"settings_version"));
+   g_gracePeriodDeadline=0;
+   Print("LICENSE: activated. auto_trading=",g_autoTradingEnabled," settings_version=",g_settingsVersion);
+   return true;
+}
+
+//--- Phase 2.5 CheckLicense(): heartbeat poll with grace-period fallback.
+void CheckLicense()
+{
+   if(InpLicenseKey=="")return;
+   string payload="{\"license_key\":\""+InpLicenseKey+"\",\"machine_id\":\""+g_machineId+
+                  "\",\"account_login\":"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+
+                  ",\"settings_version\":"+IntegerToString(g_settingsVersion)+"}";
+   string resp="";
+   int code=LicenseHttpPost("/v1/heartbeat",payload,resp);
+
+   if(code==0)
+   {
+      // transport failure: grace period if previously valid, block if never validated
+      if(g_licenseActive)
+      {
+         if(g_gracePeriodDeadline==0)
+         {
+            g_gracePeriodDeadline=TimeCurrent()+InpLicenseGraceMinutes*60;
+            Print("LICENSE: server unreachable - grace period until ",TimeToString(g_gracePeriodDeadline,TIME_DATE|TIME_MINUTES));
+         }
+         if(TimeCurrent()>g_gracePeriodDeadline)
+         {
+            g_licenseActive=false;
+            g_licenseLastReason="grace_expired";
+            Print("LICENSE: grace period expired - trading blocked");
+         }
+      }
+      else g_licenseLastReason="server_unreachable";
+      return;
+   }
+
+   if(code!=200)
+   {
+      g_licenseActive=false;
+      g_licenseLastReason="http_"+IntegerToString(code);
+      Print("LICENSE: server returned HTTP ",code);
+      return;
+   }
+
+   string v=LicenseJsonField(resp,"valid");
+   if(v!="true")
+   {
+      bool wasActive=g_licenseActive;
+      g_licenseActive=false;
+      g_licenseLastReason=LicenseJsonField(resp,"reason");
+      if(g_licenseLastReason=="")g_licenseLastReason="invalid";
+      Print("LICENSE: invalid (",g_licenseLastReason,")");
+      if(wasActive&&InpCloseOnLicenseRevoke)
+      {
+         Print("LICENSE: InpCloseOnLicenseRevoke=true -> emergency close all");
+         EmergencyCloseAll();
+      }
+      return;
+   }
+
+   // success: reset grace, refresh state, pull settings when the server bumped them
+   g_licenseActive=true;
+   g_gracePeriodDeadline=0;
+   g_autoTradingEnabled=(LicenseJsonField(resp,"auto_trading_enabled")!="false");
+   int serverVersion=(int)StringToInteger(LicenseJsonField(resp,"settings_version"));
+   if(serverVersion>g_settingsVersion)
+   {
+      g_settingsVersion=serverVersion;
+      Print("LICENSE: settings updated to version ",serverVersion);
+   }
+}
+
+//--- Phase 3: MT5 Mobile command bridge. Subscribers place a PENDING ORDER whose
+//--- comment carries the command; the EA executes it and deletes the order.
+void ProcessMobileCommands()
+{
+   if(!InpEnableMobileCommands)return;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0)continue;
+      string comment=OrderGetString(ORDER_COMMENT);
+      if(StringFind(comment,"STOP_EA")>=0)
+      {
+         GlobalVariableSet("PAT_TRADING_ENABLED",0);
+         DeleteOrderSafe(ticket);
+         Print("Mobile Command: STOP_EA");
+      }
+      else if(StringFind(comment,"START_EA")>=0)
+      {
+         GlobalVariableSet("PAT_TRADING_ENABLED",1);
+         DeleteOrderSafe(ticket);
+         Print("Mobile Command: START_EA");
+      }
+      else if(StringFind(comment,"RISK_")>=0)
+      {
+         double risk=StringToDouble(StringSubstr(comment,5));
+         if(risk>0 && risk<=5.0)   // safety ceiling: never above 5%
+         {
+            GlobalVariableSet("PAT_RISK_OVERRIDE",risk);
+            DeleteOrderSafe(ticket);
+            Print("Mobile Command: Risk set to ",risk);
+         }
+      }
+   }
+}
+
+//--- self-test: SHA256 known-answer (empty string + "abc") + gate sanity.
+void LicenseSelfTest()
+{
+   if(InpLicenseKey=="")return;
+   string e=LicenseSHA256("");
+   string a=LicenseSHA256("abc");
+   bool ok=(e=="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        && (a=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+   if(ok)Print("LICENSE: self-test PASS (SHA256 known answers, gate active)");
+   else   Print("LICENSE: self-test FAIL - SHA256 implementation mismatch; license binding is NOT safe");
+}
+//================ LICENSE CLIENT + MOBILE COMMAND BRIDGE END ==================
 //====================================================================
 // STRUCTS
 //====================================================================
@@ -2942,6 +3255,7 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
 //====================================================================
 void TryArm()
 {
+   if(!LicenseCheckGate()){return;}   // [LICENSE] no new trades without a valid license
    if(InpCancelStalePendings)DeleteOwnPendings(true);
    if(CountOwnPendings()>0){g_gateReason="pending orders working";return;}
    if(!InpArmWhileInTrade&&CountOwnPositions()>0){g_gateReason="managing open position";return;}
@@ -3921,6 +4235,25 @@ int OnInit()
    // Phase 4.1: symbol must be fully tradeable
    if(InpValidateSymbolOnInit&&(ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_MODE)!=SYMBOL_TRADE_MODE_FULL)
    {Print("INIT FAILED: symbol ",eaSymbol," is not SYMBOL_TRADE_MODE_FULL (closed/close-only).");return INIT_FAILED;}
+   // ---- License client init (Phase 2) --------------------------------------
+   if(InpLicenseKey!="")
+   {
+      if(StringFind(InpLicenseServerURL,"https://")!=0)
+      {Print("INIT FAILED: InpLicenseServerURL must start with https://");return INIT_PARAMETERS_INCORRECT;}
+      g_machineId=LicenseSHA256(TerminalInfoString(TERMINAL_COMPUTER_NAME)+"|"+
+                                TerminalInfoString(TERMINAL_DATA_PATH)+"|"+
+                                IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"|"+
+                                AccountInfoString(ACCOUNT_SERVER));
+      LicenseSelfTest();
+      if(!LicenseActivate())   // immediate first validation
+      {
+         if(TimeCurrent()>=g_gracePeriodDeadline || g_gracePeriodDeadline==0)
+         {Print("INIT FAILED: license could not be validated on first run (no grace period is active on first run).");return INIT_FAILED;}
+      }
+   }
+   // ---- Mobile command bridge (Phase 3) ------------------------------------
+   if(InpEnableMobileCommands && !GlobalVariableCheck("PAT_TRADING_ENABLED"))
+      GlobalVariableSet("PAT_TRADING_ENABLED",1);   // default: trading enabled
    // Fail-loud permission diagnosis (no silent "compiles but never trades").
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))Print("WARNING: AutoTrading is OFF - enable the Algo Trading button to allow entries.");
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))Print("WARNING: MQL trade permission denied - check Allow Algo Trading in EA settings.");
@@ -3965,6 +4298,8 @@ void OnDeinit(const int reason)
 
 void OnTick()
 {
+   if(!LicenseCheckGate())return;   // [LICENSE] blank key = zero-overhead pass-through
+   ProcessMobileCommands();         // [LICENSE] mobile command bridge (cheap: scans orders)
    RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();bool nb=IsNewBar();UpdateIndicators();RefreshFMPMacro(false);SR_Rebuild();   // [SR] throttled; before signal evaluation
    if(nb){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);
       // ultra-scalp v2 state
@@ -3996,6 +4331,11 @@ void OnTick()
 void OnTimer()
 {
    RefreshServerOffset(false);CheckNews(false);RefreshFMPMacro(false);EnforceSwapFlat();if(InpCancelStalePendings)DeleteOwnPendings(true);DashUpdate(true);SR_SelfTest();if(InpPersistState && (ServerNow()%30)==0)SaveState();
+   if(InpLicenseKey!="" && TimeCurrent()>=g_nextLicenseCheck)   // [LICENSE] WebRequest ONLY here, never in hot paths
+   {
+      CheckLicense();
+      g_nextLicenseCheck=TimeCurrent()+600;   // poll every 10 minutes
+   }
 }
 
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)

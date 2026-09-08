@@ -59,17 +59,67 @@ def source_inputs(src):
     return out
 
 
+# Authoritative ultra-scalp profile (prompt.md Phase 1, 2026-09-08 reconciliation).
+# Kept IN the tool so preset regeneration is stable even when prompt.md rotates to a
+# new mission (it is a task file, not a config store). Update BOTH here and in the
+# next prompt.md when the profile changes.
+PROFILE = {
+    "InpSimpleScalpMode": "true", "InpScalpMinMomentumATR": "0.08",
+    "InpDailyLossPercent": "2.5", "InpMaxFloatingDDPercent": "3.0",
+    "InpWeeklyLossLimit": "6.0", "InpMonthlyLossLimit": "10.0",
+    "InpRiskPercent": "0.35", "InpRiskStepDownOnDD": "0.15",
+    "InpMaxConsecutiveLosses": "3", "InpMaxTradesPerDay": "25",
+    "InpAllowMinLotFallback": "true", "InpMinLotMaxRiskPct": "1.5",
+    "InpMaxAggregateOpenRiskPct": "2.5", "InpMaxDirectionalRiskPct": "1.5",
+    "InpBreakerAction": "BREAKER_CLOSE_ALL", "InpNoMartingale": "true",
+    "InpNoAveragingDown": "true",
+    "InpMaxSpreadPoints": "35", "InpSpreadSpikeRatio": "2.0",
+    "InpMaxSpreadPercentile": "90.0", "InpMaxSlippagePoints": "25",
+    "InpCommissionPerLotRTFallback": "7.00", "InpExpectedSlipPtsFallback": "3.5",
+    "InpMaxCostToTP1Pct": "40.0", "InpMinNetProfitTP1Money": "0.30",
+    "InpMinNetProfitTP2Money": "0.50", "InpMinNetProfitTP3Money": "0.70",
+    "InpOrderRetry": "2", "InpMaxAverageSlippagePoints": "15.0",
+    "InpExtremeSlippagePoints": "25.0",
+    "InpMinRR_TP2": "0.55", "InpMinRR_TP3": "1.10",
+    "InpExecutionMode": "EXEC_DIRECTIONAL", "InpStraddleLayers": "1",
+    "InpLayerStepATR": "0.35", "InpMaxConcurrentPositions": "3",
+    "InpMaxTotalLots": "1.20", "InpArmWhileInTrade": "true", "InpScaleIn": "false",
+    "InpMinSecondsBetweenEntries": "20", "InpMinBarsFreshStructure": "2",
+    "InpMaxSignalsPerWindow": "10", "InpPerWindowRiskBudgetPct": "1.5",
+    "InpOncePerValidatedEvent": "true", "InpCancelStalePendings": "true",
+    "InpPendingExpiryMinutes": "3", "InpDistance": "1.00",
+    "InpUseATRForDistance": "true", "InpATRMultiplier": "0.22",
+    "InpLayerSpacingATR": "0.25", "InpLotSize": "0.05",
+    "InpUseThreeTargets": "true", "InpTP1Pct": "0.75", "InpTP2Pct": "0.20",
+    "InpTP3Pct": "0.05", "InpSL_ATR_Multiplier": "0.80",
+    "InpSLStructureBufferATR": "0.12", "InpTP1_ATR_Floor": "0.25",
+    "InpTP1_ATR_Cap": "0.40", "InpTP2_ATR_Floor": "0.60", "InpTP2_ATR_Cap": "1.10",
+    "InpTP3_ATR_Floor": "1.00", "InpTP3_ATR_Cap": "1.80",
+    "InpUseCostAdjustedBE": "true", "InpBEExtraLockATR": "0.02",
+    "InpUseTP3StructureTrail": "true", "InpTP3TrailATR": "0.50",
+    "InpTP3TrailStepATR": "0.10", "InpTP3EarlyExit": "true",
+    "InpMaxTradeMinutes": "10",
+    "InpFridayCutoffServer": "19.0", "InpManualServerOffsetHours": "3",
+    "InpSwapRolloverServerHour": "0.0",
+    "InpMagicNumber": "20260911", "InpComment": "Predict-A-Trade v4",
+}
+
+
 def parse_profile(prompt):
-    """Phase 1 values: the first `InpX = value` table between PHASE 1 and PHASE 2."""
-    lines = prompt.replace("\r\n", "\n").split("\n")
-    p1 = next(i for i, l in enumerate(lines) if "PHASE 1" in l)
-    p2 = next(i for i, l in enumerate(lines) if "PHASE 2" in l and i > p1)
+    """Phase 1 values: prefer the live prompt table (between PHASE 1 and PHASE 2);
+    fall back to the embedded PROFILE when prompt.md has rotated to another mission."""
+    try:
+        lines = prompt.replace("\r\n", "\n").split("\n")
+        p1 = next(i for i, l in enumerate(lines) if "PHASE 1" in l)
+        p2 = next(i for i, l in enumerate(lines) if "PHASE 2" in l and i > p1)
+    except StopIteration:
+        return dict(PROFILE)
     vals = {}
     for line in lines[p1:p2]:
         m = re.match(r"^(Inp\w+)\s*=\s*(.+?)\s*$", line)
         if m:
             vals.setdefault(m.group(1), m.group(2).strip())
-    return vals
+    return vals if vals else dict(PROFILE)
 
 
 def parse_sr_defaults(prompt):
