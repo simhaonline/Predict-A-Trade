@@ -4,6 +4,23 @@
 //| Session Overlap + High-Volatility Opportunity Engine             |
 //| Copyright 2026 Predict-A-Trade | Simha FinTech LLC, Dubai, UAE   |
 //+------------------------------------------------------------------+
+//| PRE-DEPLOY WARNING - READ BEFORE ENABLING REAL CAPITAL           |
+//|                                                                  |
+//| Many default values in this file were hand-tuned against recent  |
+//| market behaviour ("lowered from 6", "was 35", "was 15", etc.).   |
+//| Hand-tuning to visible screenshots and recent gold behaviour     |
+//| risks OVERFITTING: parameters that look perfect on the last few  |
+//| days routinely fail on new data.                                 |
+//|                                                                  |
+//| Before real capital, these defaults MUST pass:                   |
+//|  1. Walk-forward / out-of-sample testing (optimize on window A,  |
+//|     validate on unseen window B, roll forward).                  |
+//|  2. At least 2-3 months on a demo account of the SAME broker     |
+//|     and account type, with real spread/slippage/commission.      |
+//|  3. Minimum trade count for statistical meaning (100+ trades).   |
+//| A profitable backtest alone proves nothing. Tight gates that     |
+//| "feel" safer can simply select a lucky historical sample.        |
+//+------------------------------------------------------------------+
 #property copyright "Predict-A-Trade | Simha FinTech LLC"
 #property version   "1.00"
 #property description "XAUUSD M1 four-session + overlap/HV ultra-scalper. Pure MQL5: native OrderSend (no includes, no CTrade). FMP stable macro adapter with obfuscated credentials, MQL5 calendar news gate, TP1/TP2/TP3 ladder with R:R validation, reversal loss-recovery leg, broker/account telemetry and a two-column control dashboard (click header to collapse, F key to pause arming)."
@@ -171,7 +188,7 @@ input int    InpHVMinScore                = 6;
 input double InpHVMinDisplacementATR      = 0.65;
 input double InpHVMaxDisorderATR          = 2.80;
 input double InpHVMinVWAPDeviationATR     = 0.10;
-input int    InpSessionBreakoutLookback   = 30;
+input int    InpSessionBreakoutLookback   = 30;      // ROLLING M1 bars (not session-anchored range)
 input double InpHVExtraSignalRiskMult     = 0.70;
 input int    InpVerifiedBucketMinSamples  = 30;
 input double InpVerifiedBucketATRRatio    = 1.15;
@@ -247,12 +264,12 @@ input double InpRecoveryMaxSpreadPts      = 35;        // tighter spread cap for
 
 input group "=== SLIPPAGE / SWAP PROTECTION ==="
 input double InpMaxAverageSlippagePoints  = 10.0;
-input double InpExtremeSlippagePoints     = 40.0;     // was 25: gold spike SL fills regularly slip 30pt
+input double InpExtremeSlippagePoints     = 30.0;     // 30pt on gold = genuinely pathological fill; pre-trade guard covers spikes
 input bool   InpCloseOnExtremeSlippage    = false;     // optional emergency flatten after a pathological fill
 input int    InpSlippageCooldownMinutes   = 3;        // was 10: 10-min sit-outs after every SL fill = "no trades"
 input bool   InpAvoidSwap                 = true;
 input bool   InpForceFlatBeforeSwap       = true;
-input double InpSwapRolloverServerHour    = 0.0;       // broker-server rollover time; adjust for broker if needed
+input double InpSwapRolloverServerHour    = 0.0;       // server-hour of swap rollover; 0.0 = midnight server (Xelans GMT+3: correct). Verify in Journal around 00:00 server.
 input int    InpSwapBlockMinutesBefore    = 60;
 input int    InpSwapBlockMinutesAfter     = 10;
 
@@ -317,6 +334,7 @@ struct PositionState
    ENUM_WINDOW_ID window;
    string setupId;
    bool hv;
+   bool recovery;                  // loss-recovery reversal leg (excluded from window stats)
    double initialVolume;
    double initialRiskMoney;
    double entry;
@@ -350,7 +368,7 @@ string eaSymbol="";
 
 int hATR=INVALID_HANDLE,hADX=INVALID_HANDLE,hEMA20=INVALID_HANDLE,hEMA50=INVALID_HANDLE;
 int hH1EMA20=INVALID_HANDLE,hH1EMA50=INVALID_HANDLE,hM15EMA20=INVALID_HANDLE,hM15EMA50=INVALID_HANDLE;
-int hRSI=INVALID_HANDLE,hVolumes=INVALID_HANDLE;
+int hRSI=INVALID_HANDLE;
 
 double g_atr=0,g_adx=0,g_adxPlus=0,g_adxMinus=0,g_rsi=0;
 double g_ema20=0,g_ema50=0,g_h1e20=0,g_h1e50=0,g_m15e20=0,g_m15e50=0;
@@ -1223,7 +1241,9 @@ double CandleDisplacementATR()
    if(g_atr<=0)return 0;double o=iOpen(eaSymbol,PERIOD_M1,1),c=iClose(eaSymbol,PERIOD_M1,1);return MathAbs(c-o)/g_atr;
 }
 
-bool SessionRangeBreakout(int dir)
+// Rolling N-bar breakout (default 30 closed M1 bars) - NOT a true session high/low.
+// Named honestly; a session-anchored range would need SessionUTCBounds integration.
+bool RollingBreakout(int dir)
 {
    MqlRates r[];ArraySetAsSeries(r,true);int n=InpSessionBreakoutLookback+2;if(CopyRates(eaSymbol,PERIOD_M1,1,n,r)<n)return false;
    double hi=-DBL_MAX,lo=DBL_MAX;for(int i=1;i<n;i++){hi=MathMax(hi,r[i].high);lo=MathMin(lo,r[i].low);}double c=r[0].close;
@@ -1237,7 +1257,7 @@ int HVScore(int dir)
    if(vr>=InpHVMinVolumeRatio)s++;
    if(disp>=InpHVMinDisplacementATR && disp<=InpHVMaxDisorderATR)s++;
    if(g_vwap>0 && MathAbs(c-g_vwap)>=InpHVMinVWAPDeviationATR*g_atr)s++;
-   if(SessionRangeBreakout(dir))s++;
+   if(RollingBreakout(dir))s++;
    if(dir>0 && g_smcScoreBull>=InpMinSMCConfluence)s++;
    if(dir<0 && g_smcScoreBear>=InpMinSMCConfluence)s++;
    if((dir>0&&((g_ifvg&&g_ifvgDir>0)||(g_ptb&&g_ptbDir>0)))||(dir<0&&((g_ifvg&&g_ifvgDir<0)||(g_ptb&&g_ptbDir<0))))s++;
@@ -1554,10 +1574,23 @@ void BuildThreeTargets(int dir,double entry,double lots,ENUM_WINDOW_ID w,bool hv
    }
    // Restore ordering after the snap.
    if(dir>0){tp2=MathMax(tp2,tp1+md);tp3=MathMax(tp3,tp2+md);}else{tp2=MathMin(tp2,tp1-md);tp3=MathMin(tp3,tp2-md);}
-   // Cost-aware expand only enough to make each leg economically meaningful.
-   double net=0;int guard=0;while(!NetProfitValid(dir,entry,tp1,lots,InpMinNetProfitTP1Money,net)&&guard++<10)tp1+=dir*0.10*atr;
-   guard=0;while(!NetProfitValid(dir,entry,tp2,lots,InpMinNetProfitTP2Money,net)&&guard++<10)tp2+=dir*0.10*atr;
-   guard=0;while(!NetProfitValid(dir,entry,tp3,lots,InpMinNetProfitTP3Money,net)&&guard++<10)tp3+=dir*0.10*atr;
+   // Cost-aware expand per leg against the volume that will ACTUALLY close there
+   // (60/25/15 split of the ladder). Validating on full 'lots' was too lenient: a leg
+   // closing 15% of the position earns 15% of the gross but pays commission on it too,
+   // and the spread cost is only saved on that fraction.
+   double sumPct=MathMax(0.0001,InpTP1Pct+InpTP2Pct+InpTP3Pct);
+   double v1=FloorVolume(lots*InpTP1Pct/sumPct);
+   double v2=FloorVolume(lots*InpTP2Pct/sumPct);
+   double v3=FloorVolume(lots-v1-v2);
+   if(v1<broker.volumeMin)v1=lots;                       // collapse: single leg carries all
+   if(v2<broker.volumeMin)v2=(v3<broker.volumeMin?0:lots-v1);
+   if(v3<broker.volumeMin)v3=0;
+   double net=0;int guard=0;
+   while(!NetProfitValid(dir,entry,tp1,v1,InpMinNetProfitTP1Money,net)&&guard++<10)tp1+=dir*0.10*atr;
+   guard=0;
+   while(v2>0&&!NetProfitValid(dir,entry,tp2,v2,InpMinNetProfitTP2Money,net)&&guard++<10)tp2+=dir*0.10*atr;
+   guard=0;
+   while(v3>0&&!NetProfitValid(dir,entry,tp3,v3,InpMinNetProfitTP3Money,net)&&guard++<10)tp3+=dir*0.10*atr;
    if(dir>0){tp2=MathMax(tp2,tp1+md);tp3=MathMax(tp3,tp2+md);}else{tp2=MathMin(tp2,tp1-md);tp3=MathMin(tp3,tp2-md);}
    tp1=PriceNorm(tp1);tp2=PriceNorm(tp2);tp3=PriceNorm(tp3);
 }
@@ -1608,6 +1641,11 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    if(g_newsBlocked||ServerNow()<g_newsBlockedUntil){why="news/stabilization";return false;}if(IsDisorder()){why="market disorder";return false;}
    if(InSwapDangerWindow()){why="swap/rollover protection";return false;}
    if(g_slipCnt>=5&&g_slipAvg>InpMaxAverageSlippagePoints){why="slippage quality gate";return false;}
+   // Pre-trade slippage protection (not only the post-fill cooldown):
+   //  - last single fill was extreme -> stand aside for the cooldown
+   //  - current spread alone already eats the extreme-slippage budget -> stand aside
+   if(g_lastSlipPts>=InpExtremeSlippagePoints&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";return false;}
+   if(SpreadPoints()>=InpExtremeSlippagePoints*g_ptScale){why="spread at extreme-slippage level";return false;}
    if(!ExternalDataReady(why))return false;
    double sp=SpreadPoints(),spp=SpreadPercentile();if(sp>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";return false;}if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
    double atrPts=(broker.point>0?g_atr/broker.point:0);if(atrPts<InpMinATRPoints*g_ptScale){why="ATR chop";return false;}if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
@@ -1753,11 +1791,11 @@ void EmergencyCloseAll()
 int FindPS(ulong ticket){for(int i=0;i<ArraySize(g_ps);i++)if(g_ps[i].ticket==ticket)return i;return -1;}
 void RemovePS(int idx){int n=ArraySize(g_ps);if(idx<0||idx>=n)return;for(int i=idx;i<n-1;i++)g_ps[i]=g_ps[i+1];ArrayResize(g_ps,n-1);}
 
-void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string setup,bool hv,double entry,double sl,double lots,double slip,double entryComm)
+void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string setup,bool hv,bool recovery,double entry,double sl,double lots,double slip,double entryComm)
 {
    int idx=FindPS(ticket);if(idx<0){idx=ArraySize(g_ps);ArrayResize(g_ps,idx+1);}
    PositionState s;ZeroMemory(s);
-   s.ticket=ticket;s.positionId=posId;s.direction=dir;s.window=w;s.setupId=setup;s.hv=hv;
+   s.ticket=ticket;s.positionId=posId;s.direction=dir;s.window=w;s.setupId=setup;s.hv=hv;s.recovery=recovery;
    s.entry=entry;s.initialSL=sl;s.initialVolume=lots;
    s.initialRiskMoney=MathMax(0.0,PriceMoveMoney(entry-sl,lots)+ExpectedAllInCost(lots));
    s.opened=ServerNow();s.entrySpreadPct=SpreadPercentile();s.entrySlipPts=slip;s.entryAtrPct=ATRPercentile();s.entryVolRatio=g_volRatio;
@@ -1870,7 +1908,10 @@ void TryRecovery()
 
    string cmt=InpComment+"|RCV|"+(dir>0?"B":"S")+"|"+IntegerToString((int)g_lastLossTime);
    double fill=0;ulong tk=0;
-   if(MarketOrder(dir,lots,sl,t3,cmt,fill,tk))
+   // Broker TP is set to the VALIDATED TP1 (>=InpRecoveryMinRR). The recovery is a
+   // single-shot counter-trade: if the EA restarts, the position still closes at the
+   // target the entry was validated against, never an unvalidated TP3.
+   if(MarketOrder(dir,lots,sl,t1,cmt,fill,tk))
    {
       g_recoveryLegs++;g_lastLossDir=0;g_gateReason="RECOVERY ARMED "+(dir>0?"BUY":"SELL");
       if(g_log!=INVALID_HANDLE)FileWrite(g_log,TimeToString(ServerNow(),TIME_DATE|TIME_SECONDS),"RCV",dir>0?"BUY":"SELL",DoubleToString(lots,2),DoubleToString(sl,broker.digits),DoubleToString(t1,broker.digits));
@@ -1995,6 +2036,9 @@ void UpdateOverallPerformance(double net,double rr)
 void FinalizeWindowTrade(int idx,double net,double gross,double costs)
 {
    if(idx<0||idx>=ArraySize(g_ps))return;PositionState s=g_ps[idx];ENUM_WINDOW_ID w=s.window;
+   // Recovery legs keep full position management but are excluded from per-window
+   // statistics and from resetting/extending the consecutive-loss streak of a window.
+   if(s.recovery){RemovePS(idx);return;}
    if(w<=WIN_NONE||w>=WIN_COUNT){RemovePS(idx);return;}
    g_ws[w].trades++;g_ws[w].netPL+=net;g_ws[w].grossPL+=gross;g_ws[w].costs+=costs;g_ws[w].slipSum+=MathAbs(s.entrySlipPts);g_ws[w].spreadPctSum+=s.entrySpreadPct;g_ws[w].atrPctSum+=s.entryAtrPct;g_ws[w].volRatioSum+=s.entryVolRatio;g_ws[w].maeSum+=s.maePrice;g_ws[w].mfeSum+=s.mfePrice;if(net>0){g_ws[w].wins++;g_consecutiveLosses=0;}else if(net<0){g_ws[w].losses++;g_consecutiveLosses++;}
    double rr=(s.initialRiskMoney>0?net/s.initialRiskMoney:0);UpdateOverallPerformance(net,rr);g_ws[w].rSum+=rr;g_ws[w].peakNet=MathMax(g_ws[w].peakNet,g_ws[w].netPL);g_ws[w].maxDD=MathMax(g_ws[w].maxDD,g_ws[w].peakNet-g_ws[w].netPL);PushRecentNet(w,net);RefreshWindowGating(w);RemovePS(idx);
@@ -2024,23 +2068,40 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       PushSlippage(slip);
       if(MathAbs(slip)>=InpExtremeSlippagePoints){g_disorderUntil=ServerNow()+InpSlippageCooldownMinutes*60;}
       ENUM_WINDOW_ID w=WIN_NONE;string setup="";string c=HistoryDealGetString(trans.deal,DEAL_COMMENT);
-      if(StringFind(c,"|RCV")<0)
+      bool isRecovery=(StringFind(c,"|RCV")>=0);
       {
-         w=ParseWindowFromComment(c);setup=ParseSetupFromComment(c);bool hvC=ParseHVFromComment(c);
-         if(w==WIN_NONE){bool tr=false;w=CurrentWindow(tr);}
+         // Recovery legs are tracked EXACTLY like normal positions (TP1/TP2 partial ladder,
+         // time stop, swap exit, consecutive-loss accounting) under WIN_NONE; only window
+         // stats routing differs (FinalizeWindowTrade skips stats for recovery=true).
+         if(!isRecovery)
+         {
+            w=ParseWindowFromComment(c);setup=ParseSetupFromComment(c);
+            if(w==WIN_NONE){bool tr=false;w=CurrentWindow(tr);}
+         }
+         bool hvC=(!isRecovery&&ParseHVFromComment(c));
          int dir=(dt==DEAL_TYPE_BUY?1:-1);
          ulong ticket=0;for(int i=0;i<PositionsTotal();i++){ulong t=PositionGetTicket(i);if(t&&PositionSelectByTicket(t)&&PositionGetInteger(POSITION_IDENTIFIER)==posId){ticket=t;break;}}
          if(ticket&&PositionSelectByTicket(ticket))
          {
             double sl=PositionGetDouble(POSITION_SL),fv=PositionGetDouble(POSITION_VOLUME);
-            AddPositionState(ticket,posId,dir,w,setup,hvC,price,sl,fv,slip,HistoryDealGetDouble(trans.deal,DEAL_COMMISSION));
+            AddPositionState(ticket,posId,dir,w,setup,hvC,isRecovery,price,sl,fv,slip,HistoryDealGetDouble(trans.deal,DEAL_COMMISSION));
             // Charge the per-window risk budget for the ACTUAL fill (each straddle layer separately),
             // so partial/layered fills can never exceed the window budget.
-            if(w>WIN_NONE&&w<WIN_COUNT&&sl>0)g_windowRiskUsed[w]+=PriceMoveMoney(price-sl,fv)+ExpectedAllInCost(fv);
+            if(!isRecovery&&w>WIN_NONE&&w<WIN_COUNT&&sl>0)g_windowRiskUsed[w]+=PriceMoveMoney(price-sl,fv)+ExpectedAllInCost(fv);
             if(InpCloseOnExtremeSlippage&&MathAbs(slip)>=InpExtremeSlippagePoints)ClosePositionSafe(ticket);
          }
-         // OCO safety: after first fill, remove opposite pending orders.
-         for(int i=OrdersTotal()-1;i>=0;i--){ulong ot=OrderGetTicket(i);if(!ot||!OrderSelect(ot))continue;if(OrderGetString(ORDER_SYMBOL)!=eaSymbol||OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber)continue;ENUM_ORDER_TYPE typ=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);if((dir>0&&typ==ORDER_TYPE_SELL_STOP)||(dir<0&&typ==ORDER_TYPE_BUY_STOP))DeleteOrderSafe(ot);}
+                  if(!isRecovery)
+         {
+            // OCO safety: after first fill, remove opposite pending orders.
+            for(int i=OrdersTotal()-1;i>=0;i--)
+            {
+               ulong ot=OrderGetTicket(i);
+               if(!ot||!OrderSelect(ot))continue;
+               if(OrderGetString(ORDER_SYMBOL)!=eaSymbol||OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber)continue;
+               ENUM_ORDER_TYPE typ=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+               if((dir>0&&typ==ORDER_TYPE_SELL_STOP)||(dir<0&&typ==ORDER_TYPE_BUY_STOP))DeleteOrderSafe(ot);
+            }
+         }
       }
    }
    else if(e==DEAL_ENTRY_OUT||e==DEAL_ENTRY_OUT_BY)
@@ -2052,9 +2113,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       if(!still&&pidx>=0)
       {
          double finalNet=g_ps[pidx].realizedNet;
-         if(finalNet<0)
+         if(finalNet<0 && !g_ps[pidx].recovery)
          {
-            // Realized loss: open ONE gated reversal opportunity.
+            // Realized base-strategy loss: open ONE gated reversal opportunity.
+            // Recovery-leg losses never chain another recovery.
             g_lastLossDir=g_ps[pidx].direction;g_lastLossTime=ServerNow();g_lastLossMoney=finalNet;
             g_gateReason="LOSS - recovery candidate";
          }
@@ -2066,7 +2128,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 //====================================================================
 // STATE / LOGGING
 //====================================================================
-#define STATE_TAG 20260912
+#define STATE_TAG 20260913
 string StateName(){return "PAT101_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)+".bin";}
 
 void SaveState()
@@ -2075,6 +2137,26 @@ void SaveState()
    FileWriteInteger(f,STATE_TAG,INT_VALUE);
    FileWriteInteger(f,g_dayKey,INT_VALUE);FileWriteInteger(f,g_weekKey,INT_VALUE);FileWriteInteger(f,g_monthKey,INT_VALUE);FileWriteDouble(f,g_dayAnchor);FileWriteDouble(f,g_weekAnchor);FileWriteDouble(f,g_monthAnchor);FileWriteInteger(f,g_tradesToday,INT_VALUE);FileWriteInteger(f,g_consecutiveLosses,INT_VALUE);FileWriteDouble(f,g_commissionRTPerLot);FileWriteInteger(f,g_perfTrades,INT_VALUE);FileWriteInteger(f,g_perfWins,INT_VALUE);FileWriteInteger(f,g_perfLosses,INT_VALUE);FileWriteDouble(f,g_perfNetProfit);FileWriteDouble(f,g_perfGrossProfit);FileWriteDouble(f,g_perfGrossLoss);FileWriteInteger(f,g_perfRetN,INT_VALUE);FileWriteDouble(f,g_perfRetMean);FileWriteDouble(f,g_perfRetM2);FileWriteDouble(f,g_perfCumNet);FileWriteDouble(f,g_perfPeakNet);FileWriteDouble(f,g_perfMaxDDMoney);
    for(int w=0;w<WIN_COUNT;w++){FileWriteInteger(f,g_ws[w].trades,INT_VALUE);FileWriteInteger(f,g_ws[w].wins,INT_VALUE);FileWriteInteger(f,g_ws[w].losses,INT_VALUE);FileWriteDouble(f,g_ws[w].grossPL);FileWriteDouble(f,g_ws[w].netPL);FileWriteDouble(f,g_ws[w].costs);FileWriteInteger(f,g_ws[w].tp1Hits,INT_VALUE);FileWriteInteger(f,g_ws[w].tp2Hits,INT_VALUE);FileWriteInteger(f,g_ws[w].tp3Hits,INT_VALUE);}
+   // --- open-position ladder plans: a VPS restart must not silently drop the
+   // --- 60/25/15 partial management and leave positions broker-managed to TP3/SL.
+   int nPS=ArraySize(g_ps);FileWriteInteger(f,nPS,INT_VALUE);
+   for(int p=0;p<nPS;p++)
+   {
+      FileWriteLong(f,(long)g_ps[p].ticket);FileWriteLong(f,g_ps[p].positionId);
+      FileWriteInteger(f,g_ps[p].direction,INT_VALUE);FileWriteInteger(f,(int)g_ps[p].window,INT_VALUE);
+      FileWriteString(f,g_ps[p].setupId);FileWriteInteger(f,0,INT_VALUE);   // terminator for the string
+      FileWriteInteger(f,g_ps[p].hv?1:0,INT_VALUE);FileWriteInteger(f,g_ps[p].recovery?1:0,INT_VALUE);
+      FileWriteDouble(f,g_ps[p].initialVolume);FileWriteDouble(f,g_ps[p].initialRiskMoney);
+      FileWriteDouble(f,g_ps[p].entry);FileWriteDouble(f,g_ps[p].initialSL);
+      FileWriteDouble(f,g_ps[p].tp1);FileWriteDouble(f,g_ps[p].tp2);FileWriteDouble(f,g_ps[p].tp3);
+      FileWriteDouble(f,g_ps[p].volTP1);FileWriteDouble(f,g_ps[p].volTP2);FileWriteDouble(f,g_ps[p].volTP3);
+      FileWriteInteger(f,g_ps[p].tp1Done?1:0,INT_VALUE);FileWriteInteger(f,g_ps[p].tp2Done?1:0,INT_VALUE);FileWriteInteger(f,g_ps[p].tp3Done?1:0,INT_VALUE);
+      FileWriteDouble(f,g_ps[p].maePrice);FileWriteDouble(f,g_ps[p].mfePrice);
+      FileWriteLong(f,(long)g_ps[p].opened);
+      FileWriteDouble(f,g_ps[p].entrySpreadPct);FileWriteDouble(f,g_ps[p].entrySlipPts);
+      FileWriteDouble(f,g_ps[p].entryAtrPct);FileWriteDouble(f,g_ps[p].entryVolRatio);
+      FileWriteDouble(f,g_ps[p].realizedGross);FileWriteDouble(f,g_ps[p].realizedNet);FileWriteDouble(f,g_ps[p].realizedCosts);
+   }
    FileClose(f);
 }
 
@@ -2085,6 +2167,38 @@ void LoadState()
    if(tag!=STATE_TAG){FileClose(f);Print("State file format differs (tag=",tag,") - starting from a clean slate.");return;}
    g_dayKey=(int)FileReadInteger(f,INT_VALUE);g_weekKey=(int)FileReadInteger(f,INT_VALUE);g_monthKey=(int)FileReadInteger(f,INT_VALUE);g_dayAnchor=FileReadDouble(f);g_weekAnchor=FileReadDouble(f);g_monthAnchor=FileReadDouble(f);g_tradesToday=(int)FileReadInteger(f,INT_VALUE);g_consecutiveLosses=(int)FileReadInteger(f,INT_VALUE);g_commissionRTPerLot=FileReadDouble(f);if(!FileIsEnding(f)){g_perfTrades=(int)FileReadInteger(f,INT_VALUE);g_perfWins=(int)FileReadInteger(f,INT_VALUE);g_perfLosses=(int)FileReadInteger(f,INT_VALUE);g_perfNetProfit=FileReadDouble(f);g_perfGrossProfit=FileReadDouble(f);g_perfGrossLoss=FileReadDouble(f);g_perfRetN=(int)FileReadInteger(f,INT_VALUE);g_perfRetMean=FileReadDouble(f);g_perfRetM2=FileReadDouble(f);g_perfCumNet=FileReadDouble(f);g_perfPeakNet=FileReadDouble(f);g_perfMaxDDMoney=FileReadDouble(f);}
    for(int w=0;w<WIN_COUNT&&!FileIsEnding(f);w++){g_ws[w].trades=(int)FileReadInteger(f,INT_VALUE);g_ws[w].wins=(int)FileReadInteger(f,INT_VALUE);g_ws[w].losses=(int)FileReadInteger(f,INT_VALUE);g_ws[w].grossPL=FileReadDouble(f);g_ws[w].netPL=FileReadDouble(f);g_ws[w].costs=FileReadDouble(f);g_ws[w].tp1Hits=(int)FileReadInteger(f,INT_VALUE);g_ws[w].tp2Hits=(int)FileReadInteger(f,INT_VALUE);g_ws[w].tp3Hits=(int)FileReadInteger(f,INT_VALUE);}
+   // --- open-position ladder plans (only re-attached if the position still exists)
+   if(!FileIsEnding(f))
+   {
+      int nPS=(int)FileReadInteger(f,INT_VALUE);
+      for(int p=0;p<nPS&&!FileIsEnding(f);p++)
+      {
+         PositionState s;ZeroMemory(s);
+         s.ticket=(ulong)FileReadLong(f);s.positionId=FileReadLong(f);
+         s.direction=(int)FileReadInteger(f,INT_VALUE);s.window=(ENUM_WINDOW_ID)FileReadInteger(f,INT_VALUE);
+         s.setupId=FileReadString(f);FileReadInteger(f,INT_VALUE);   // string terminator
+         s.hv=(FileReadInteger(f,INT_VALUE)==1);s.recovery=(FileReadInteger(f,INT_VALUE)==1);
+         s.initialVolume=FileReadDouble(f);s.initialRiskMoney=FileReadDouble(f);
+         s.entry=FileReadDouble(f);s.initialSL=FileReadDouble(f);
+         s.tp1=FileReadDouble(f);s.tp2=FileReadDouble(f);s.tp3=FileReadDouble(f);
+         s.volTP1=FileReadDouble(f);s.volTP2=FileReadDouble(f);s.volTP3=FileReadDouble(f);
+         s.tp1Done=(FileReadInteger(f,INT_VALUE)==1);s.tp2Done=(FileReadInteger(f,INT_VALUE)==1);s.tp3Done=(FileReadInteger(f,INT_VALUE)==1);
+         s.maePrice=FileReadDouble(f);s.mfePrice=FileReadDouble(f);
+         s.opened=(datetime)FileReadLong(f);
+         s.entrySpreadPct=FileReadDouble(f);s.entrySlipPts=FileReadDouble(f);
+         s.entryAtrPct=FileReadDouble(f);s.entryVolRatio=FileReadDouble(f);
+         s.realizedGross=FileReadDouble(f);s.realizedNet=FileReadDouble(f);s.realizedCosts=FileReadDouble(f);
+         // Re-attach only if the position still exists (partial closes during downtime
+         // may have changed the volume; ManagePosition always reads live volume anyway).
+         bool exists=false;
+         for(int i=0;i<PositionsTotal();i++){ulong t=PositionGetTicket(i);if(t&&PositionSelectByTicket(t)&&PositionGetInteger(POSITION_IDENTIFIER)==s.positionId){exists=true;break;}}
+         if(exists&&s.ticket>0)
+         {
+            int sz=ArraySize(g_ps);ArrayResize(g_ps,sz+1);g_ps[sz]=s;
+            Print("Restored open-position plan ticket=",s.ticket," (TP1 ",DoubleToString(s.tp1,broker.digits),")");
+         }
+      }
+   }
    FileClose(f);
 }
 
@@ -2140,6 +2254,9 @@ string ClipText(string s,int maxW,int fs)
 {
    if(maxW<=12) return (StringLen(s)==0?s:"");
    if(StringLen(s)==0) return s;
+   // Measure with the EXACT font/size the label renders in; TextGetSize without
+   // TextSetFont uses terminal defaults whose metrics differ from Consolas.
+   TextSetFont("Consolas",FontOut(fs),FW_DONTCARE,0,0);
    uint w=0,h=0;
    if(!TextGetSize(s,w,h)) return s;
    if((int)w<=maxW) return s;
@@ -2151,9 +2268,6 @@ string ClipText(string s,int maxW,int fs)
    }
    return "";
 }
-// NOTE: TextGetSize measures at the terminal's default font metrics; MQL labels render
-// slightly wider than measured under DPI scaling. Callers pass maxW with a safety margin
-// (column width minus 12-16px) which absorbs the difference.
 
 void UIRecompute()
 {
@@ -2198,12 +2312,11 @@ void UILabel(string n,int x,int y,string txt,color c,int sz=-1)
    if(g_measure)return;                       // pass-1 layout sweep draws nothing
    int req=(sz>0?sz:g_font);
    int fs=FontOut(req);
-   bool bold=(req>=g_font+2);
    string id=UI_PREFIX+n;if(ObjectFind(0,id)<0)ObjectCreate(0,id,OBJ_LABEL,0,0,0);
    ObjectSetInteger(0,id,OBJPROP_CORNER,CORNER_LEFT_UPPER);
    ObjectSetInteger(0,id,OBJPROP_XDISTANCE,x);ObjectSetInteger(0,id,OBJPROP_YDISTANCE,y);
    ObjectSetInteger(0,id,OBJPROP_COLOR,c);ObjectSetInteger(0,id,OBJPROP_FONTSIZE,fs);
-   ObjectSetString(0,id,OBJPROP_FONT,(bold?"Arial Bold":"Consolas"));
+   ObjectSetString(0,id,OBJPROP_FONT,"Consolas");   // single font: TextGetSize metrics == rendered metrics
    ObjectSetString(0,id,OBJPROP_TEXT,txt);
    ObjectSetInteger(0,id,OBJPROP_HIDDEN,true);ObjectSetInteger(0,id,OBJPROP_SELECTABLE,false);
 }
@@ -2237,6 +2350,7 @@ void DashRowSplit(string n,int col,int &y,string left,string right,color cl,colo
    {
       UILabel("R_"+n,x,y+MathMax(0,(g_rh-g_fontPx)/2),ClipText(left,g_colW-100,g_font),cl,g_font);
       uint w=0,h=0;string r=ClipText(right,SX(96),g_font);
+      TextSetFont("Consolas",FontOut(g_font),FW_DONTCARE,0,0);
       TextGetSize(r,w,h);
       UILabel("R_"+n+"b",x+g_colW-12-SX(4)-(int)w,y+MathMax(0,(g_rh-g_fontPx)/2),r,cr,g_font);
    }
@@ -2523,19 +2637,20 @@ int OnInit()
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))Print("WARNING: AutoTrading is OFF - enable the Algo Trading button to allow entries.");
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))Print("WARNING: MQL trade permission denied - check Allow Algo Trading in EA settings.");
    if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))Print("WARNING: Account forbids expert trading.");
-   hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);hVolumes=iVolumes(eaSymbol,PERIOD_M1,VOLUME_TICK);
-   if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE||hVolumes==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
+   hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);
+   if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
    g_x=InpPanelX;g_y=InpPanelY;ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
    PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();OpenLog();IsNewBar();UpdateSpreadStats();UpdateIndicators();RefreshVolumeRatio();RefreshFMPMacro(true);UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();EventSetTimer(1);g_gateReason="initialized";DashUpdate(true);
    Print("Predict-A-Trade v1.00 initialized | ",eaSymbol," | digits=",broker.digits," ptScale=",g_ptScale," | server-UTC offset=",g_serverOffsetSec,"s | minVol=",broker.volumeMin," step=",broker.volumeStep," stops=",broker.stopsLevel," freeze=",broker.freezeLevel," hedging=",broker.hedging);
    Print("Broker: ",broker.company," | ",AccTypeName(broker.tradeMode)," account | leverage 1:",broker.leverage," | swap L/S ",DoubleToString(broker.swapLong,2),"/",DoubleToString(broker.swapShort,2));
+   Print("Swap rollover assumed at ",DoubleToString(InpSwapRolloverServerHour,2)," server time - VERIFY: positions held over this hour must show a swap entry in History; if the swap posts at a different hour, adjust InpSwapRolloverServerHour.");
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
    EventKillTimer();if(InpPersistState)SaveState();if(g_log!=INVALID_HANDLE){FileFlush(g_log);FileClose(g_log);g_log=INVALID_HANDLE;}WriteWindowReport();WritePerformanceReport();DashDestroy();
-   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);if(hVolumes!=INVALID_HANDLE)IndicatorRelease(hVolumes);PrintSummary();
+   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);PrintSummary();
 }
 
 void OnTick()
