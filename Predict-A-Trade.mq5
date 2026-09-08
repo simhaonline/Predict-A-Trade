@@ -66,7 +66,7 @@ input double InpWeeklyLossLimit           = 8.0;
 input double InpMonthlyLossLimit          = 15.0;
 input double InpRiskPercent               = 0.50;
 input double InpRiskStepDownOnDD          = 0.10;
-input int    InpMaxConsecutiveLosses      = 3;
+input int    InpMaxConsecutiveLosses      = 2;      // 2 straight losses = pause (ultra-scalp frequency demands tighter lock)
 input int    InpMaxTradesPerDay           = 60;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
 input double InpMinLotMaxRiskPct          = 2.0;       // min-lot trade allowed only if its risk <= this % of balance
@@ -201,13 +201,13 @@ input double InpVerifiedBucketVolRatio    = 1.10;
 
 input group "=== TP1 + TP2 + TP3 EXIT ENGINE ==="
 input bool   InpUseThreeTargets           = true;
-input double InpTP1Pct                    = 0.60;      // 60% off at TP1: bank profit early, runner to TP2/TP3
-input double InpTP2Pct                    = 0.25;
-input double InpTP3Pct                    = 0.15;
-input double InpSL_ATR_Multiplier         = 1.00;      // was 1.25: tighter stop improves ladder R:R
+input double InpTP1Pct                    = 0.70;      // 70% off at TP1: scalp banking, small runner
+input double InpTP2Pct                    = 0.20;
+input double InpTP3Pct                    = 0.10;
+input double InpSL_ATR_Multiplier         = 0.90;      // was 1.25: tighter stop improves ladder R:R
 input double InpSLStructureBufferATR      = 0.15;
-input double InpTP1_ATR_Floor             = 0.35;
-input double InpTP1_ATR_Cap               = 0.90;
+input double InpTP1_ATR_Floor             = 0.30;
+input double InpTP1_ATR_Cap               = 0.60;
 input double InpTP2_ATR_Floor             = 0.75;
 input double InpTP2_ATR_Cap               = 1.60;
 input double InpTP3_ATR_Floor             = 1.20;
@@ -218,7 +218,7 @@ input bool   InpUseTP3StructureTrail      = true;
 input double InpTP3TrailATR               = 0.70;
 input double InpTP3TrailStepATR           = 0.15;
 input bool   InpTP3EarlyExit              = true;
-input int    InpMaxTradeMinutes           = 50;      // was 35: more room for TP1 to hit
+input int    InpMaxTradeMinutes           = 20;      // scalp: in-and-out; stale scalps die fast
 
 input group "=== NEWS / DISORDER PROTECTION ==="
 input bool   InpUseNewsFilter             = true;
@@ -261,7 +261,7 @@ input int    InpMinAdvancedSMCConfluence  = 0;      // 0 = IFVG/PTB add score bu
 input group "=== LOSS RECOVERY / REVERSAL ENGINE ==="
 input bool   InpUseRecovery               = true;      // after a realized loss, arm ONE controlled reversal leg
 input int    InpRecoveryMaxLegs           = 1;         // reversal legs allowed per loss event (1 = single counter-trade)
-input double InpRecoveryRiskPct           = 0.30;      // % balance risked on the recovery leg (below base risk)
+input double InpRecoveryRiskPct           = 0.20;      // smaller counter-leg risk at scalp frequency      // % balance risked on the recovery leg (below base risk)
 input double InpRecoveryMinRR             = 1.60;      // recovery TP1 must beat this multiple of its SL distance
 input int    InpRecoveryCooldownSec       = 240;       // min seconds between the loss and the recovery entry
 input int    InpRecoveryMaxAgeSec         = 900;       // recovery opportunity expires after this many seconds
@@ -1580,10 +1580,16 @@ double NearestLiquidityTarget(int dir,double entry,int lookback,double fallback)
 double ComputeSL(int dir,double entry)
 {
    double atr=MathMax(g_atr,MinTradeDistance());double byAtr=(dir>0?entry-InpSL_ATR_Multiplier*atr:entry+InpSL_ATR_Multiplier*atr);
-   double byStruct=byAtr;
-   if(dir>0&&g_swingLow>0)byStruct=g_swingLow-InpSLStructureBufferATR*atr;
-   if(dir<0&&g_swingHigh>0)byStruct=g_swingHigh+InpSLStructureBufferATR*atr;
-   double sl=(dir>0?MathMin(byAtr,byStruct):MathMax(byAtr,byStruct));double md=MinTradeDistance();if(dir>0&&entry-sl<md)sl=entry-md;if(dir<0&&sl-entry<md)sl=entry+md;return PriceNorm(sl);
+   double sl=byAtr;
+   // Structure-aware SL only in the complex engine. In ultra-scalp mode the ATR stop is
+   // HARD: widening to swing structure (potentially 3-5x the ATR distance on M1 gold)
+   // is exactly what turned "risk 0.5%" into major losses.
+   if(!InpSimpleScalpMode)
+   {
+      if(dir>0&&g_swingLow>0)sl=MathMin(sl,g_swingLow-InpSLStructureBufferATR*atr);
+      if(dir<0&&g_swingHigh>0)sl=MathMax(sl,g_swingHigh+InpSLStructureBufferATR*atr);
+   }
+   double md=MinTradeDistance();if(dir>0&&entry-sl<md)sl=entry-md;if(dir<0&&sl-entry<md)sl=entry+md;return PriceNorm(sl);
 }
 
 double RegimeTPMultiplier(ENUM_WINDOW_ID w,bool hv)
