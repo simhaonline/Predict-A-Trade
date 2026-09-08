@@ -413,7 +413,7 @@ int      g_fmp429Count=0;
 int      g_fmpCycle=0;
 bool     g_usdGotSPX=false;
 double   g_m5e20=0,g_m5e50=0,g_m5adx=0,g_m5adxPlus=0,g_m5adxMinus=0;
-double   g_rsi=0,g_bbUp=0,g_bbLo=0,g_bbMid=0;
+double   g_bbUp=0,g_bbLo=0,g_bbMid=0;
 int      g_scalpSignal=0;   // +1 trend-long, -1 trend-short, +2 reversion-long, -2 reversion-short, 0 none
 string   g_scalpWhy="";
 double   g_spxBatchChg=0;
@@ -3009,7 +3009,7 @@ void OnTick()
       if(CopyBuffer(hM5ADX,1,0,1,adxp)>0)g_m5adxPlus=adxp[0];
       if(CopyBuffer(hM5ADX,2,0,1,adxm)>0)g_m5adxMinus=adxm[0];
       // Bollinger 20,2 on M1 closes (manual std over 20 bars)
-      double closes[20];ArraySetAsSeries(closes,false);
+      double closes[20];   // mean/std are order-independent; no series flag needed
       if(CopyClose(eaSymbol,PERIOD_M1,1,20,closes)==20)
       {
          double sum=0;for(int k=0;k<20;k++)sum+=closes[k];g_bbMid=sum/20.0;
