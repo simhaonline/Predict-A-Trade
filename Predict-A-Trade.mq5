@@ -1514,9 +1514,23 @@ void UpdateRiskPeriods()
    if(g_weekAnchor>0)
    {
       double wdd=(g_weekAnchor-eq)/g_weekAnchor*100.0;
-      if(wdd>60.0||wdd<-60.0)g_weekAnchor=eq;
+      if(wdd>60.0||wdd<-60.0)
+      {
+         g_weekAnchor=eq;    // anchor provably stale (state carry-over) - re-anchor
+         g_stopWeek=false;   // and clear the halt it wrongly triggered
+      }
    }
    if(g_monthKey!=mk){g_monthKey=mk;g_monthAnchor=eq;g_stopMonth=false;}
+   if(g_dayAnchor>0)
+   {
+      double dd2=(g_dayAnchor-eq)/g_dayAnchor*100.0;
+      if(dd2>60.0||dd2<-60.0){g_dayAnchor=eq;g_stopDay=false;g_tradesToday=0;}
+   }
+   if(g_monthAnchor>0)
+   {
+      double md2=(g_monthAnchor-eq)/g_monthAnchor*100.0;
+      if(md2>60.0||md2<-60.0){g_monthAnchor=eq;g_stopMonth=false;}
+   }
    double d=(g_dayAnchor>0?(g_dayAnchor-eq)/g_dayAnchor*100:0),w=(g_weekAnchor>0?(g_weekAnchor-eq)/g_weekAnchor*100:0),m=(g_monthAnchor>0?(g_monthAnchor-eq)/g_monthAnchor*100:0);
    g_maxDDSeen=MathMax(g_maxDDSeen,MathMax(0,d));if(d>=InpDailyLossPercent||d>=InpMaxFloatingDDPercent)g_stopDay=true;if(w>=InpWeeklyLossLimit)g_stopWeek=true;if(m>=InpMonthlyLossLimit)g_stopMonth=true;
    if(g_consecutiveLosses>=InpMaxConsecutiveLosses)g_stopDay=true;
@@ -2014,7 +2028,9 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
 //====================================================================
 void TryArm()
 {
-   if(InpCancelStalePendings)DeleteOwnPendings(true);if(CountOwnPendings()>0)return;if(!InpArmWhileInTrade&&CountOwnPositions()>0)return;
+   if(InpCancelStalePendings)DeleteOwnPendings(true);
+   if(CountOwnPendings()>0){g_gateReason="pending orders working";return;}
+   if(!InpArmWhileInTrade&&CountOwnPositions()>0){g_gateReason="managing open position";return;}
    // EXEC_STRADDLE arms stop orders ahead of price; EXEC_DIRECTIONAL fires a market
    // order at signal time; EXEC_AUTO picks directional only in verified HV windows.
    int dir;
