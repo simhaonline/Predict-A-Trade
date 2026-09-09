@@ -467,6 +467,11 @@ input bool   InpUseLogFile                = true;
 input bool   InpPersistState              = true;
 input bool   InpShowDashboard             = true;
 input bool   InpRunInitSelfTests          = false;    // verbose init self-tests + multi-line diagnostics (debug only)
+
+input group "=== MULTI-TIMEFRAME ALIGNMENT (M1 execution + M15/M30/H1 direction) ==="
+input bool   InpUseMTFAlignment           = true;     // require higher-TF trend agreement (M15/M30/H1 stacks)
+input int    InpMTFMinAligned             = 2;        // min TFs (of M15/M30/H1) whose EMA stack agrees with the trade direction (0=off)
+input double InpMTFConfidenceBonus        = 5.0;      // confidence bonus when ALL higher TFs align
 input int    InpPanelX                    = 430;       // initial panel X (clear of left dock; drag header to move)
 input int    InpPanelY                    = 30;        // initial panel Y (drag header to move)
 input int    InpPanelFontSize             = 8;         // 6..12; 8 recommended - all values readable
@@ -563,6 +568,7 @@ input string          InpSRObjPrefix             = "PAT_SR_";
 
 double g_atr=0,g_adx=0,g_adxPlus=0,g_adxMinus=0,g_rsi=0;
 double g_ema20=0,g_ema50=0,g_h1e20=0,g_h1e50=0,g_m15e20=0,g_m15e50=0;
+double g_m30e20=0,g_m30e50=0;   // [MTF] M30 stack
 double g_vwap=0,g_vwapUp=0,g_vwapDn=0;
 bool g_fvg=false; int g_fvgDir=0; double g_fvgTop=0,g_fvgBottom=0;
 bool g_ifvg=false; int g_ifvgDir=0; double g_ifvgTop=0,g_ifvgBottom=0;
@@ -1341,6 +1347,7 @@ string eaSymbol="";
 
 int hATR=INVALID_HANDLE,hADX=INVALID_HANDLE,hEMA20=INVALID_HANDLE,hEMA50=INVALID_HANDLE;
 int hH1EMA20=INVALID_HANDLE,hH1EMA50=INVALID_HANDLE,hM15EMA20=INVALID_HANDLE,hM15EMA50=INVALID_HANDLE;
+int hM30E20=INVALID_HANDLE,hM30E50=INVALID_HANDLE;   // [MTF] M30 alignment layer
 int hRSI=INVALID_HANDLE,hM5E20=INVALID_HANDLE,hM5E50=INVALID_HANDLE,hM5ADX=INVALID_HANDLE;
 int hEMA9=INVALID_HANDLE,hEMA200=INVALID_HANDLE,hMACD=INVALID_HANDLE;   // [SIGNAL QUALITY]
 
@@ -2260,6 +2267,7 @@ void UpdateIndicators()
    Copy1(hEMA20,0,1,g_ema20);Copy1(hEMA50,0,1,g_ema50);
    Copy1(hH1EMA20,0,1,g_h1e20);Copy1(hH1EMA50,0,1,g_h1e50);
    Copy1(hM15EMA20,0,1,g_m15e20);Copy1(hM15EMA50,0,1,g_m15e50);
+   if(InpUseMTFAlignment){Copy1(hM30E20,0,1,g_m30e20);Copy1(hM30E50,0,1,g_m30e50);}
    Copy1(hRSI,0,1,g_rsi);
    //--- [SIGNAL QUALITY] EMA9 / EMA200 / MACD (sections 4/5/6)
    if(hEMA9!=INVALID_HANDLE)Copy1(hEMA9,0,1,g_ema9);
@@ -2975,7 +2983,15 @@ double ComputeConfidence(int dir,ConfidenceBreakdown &out,string &reasonBuf,bool
       bool hBull=(g_h1e20>g_h1e50&&g_m15e20>g_m15e50),hBear=(g_h1e20<g_h1e50&&g_m15e20<g_m15e50);
       if(bullish&&hBull){trend+=3;reasonBuf+="H1_M15_UP ";}
       if(!bullish&&hBear){trend+=3;reasonBuf+="H1_M15_DN ";}
-      trend=MathMin(trend,15.0);
+      //--- [MTF] full M15/M30/H1 alignment bonus (the gate already required the minimum)
+      if(InpUseMTFAlignment)
+      {
+         int upStacks=((g_m15e20>g_m15e50)?1:0)+((g_m30e20>g_m30e50)?1:0)+((g_h1e20>g_h1e50)?1:0);
+         int dnStacks=((g_m15e20<g_m15e50)?1:0)+((g_m30e20<g_m30e50)?1:0)+((g_h1e20<g_h1e50)?1:0);
+         if(bullish&&upStacks==3){trend+=InpMTFConfidenceBonus;reasonBuf+="MTF_FULL_UP ";}
+         if(!bullish&&dnStacks==3){trend+=InpMTFConfidenceBonus;reasonBuf+="MTF_FULL_DN ";}
+      }
+      trend=MathMin(trend,20.0);
    }
    //================= VOLUME / LIQUIDITY (max 15) =================
    {
@@ -3084,6 +3100,7 @@ double ComputeConfidence(int dir,ConfidenceBreakdown &out,string &reasonBuf,bool
    }
    //================= aggregate with missing-data renormalization (section 10) =========
    double possible=g_wPrice+g_wTrend+g_wVolume+g_wMomentum+g_wVWAP+g_wVol+g_wMacro+g_wOptions+g_wRR;
+   if(InpUseMTFAlignment)possible+=InpMTFConfidenceBonus;   // [MTF] full-alignment bonus headroom
    if(InpNormalizeMissingExternalData)
    {
       if(AvailableMacroCount()==0)possible-=g_wMacro;
@@ -4399,6 +4416,16 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       int want=(g_scalpSignal>0?1:-1);
       if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";return false;}
       setup=g_scalpWhy;
+      //--- [MTF] higher-timeframe trend alignment (M15/M30/H1): count stacks agreeing
+      //--- with the trade direction. InpMTFMinAligned=0 disables the gate entirely.
+      if(InpUseMTFAlignment&&InpMTFMinAligned>0)
+      {
+         int aligned=0,checked=0;
+         if(g_m15e20>0&&g_m15e50>0){checked++;if((dir>0&&g_m15e20>g_m15e50)||(dir<0&&g_m15e20<g_m15e50))aligned++;}
+         if(g_m30e20>0&&g_m30e50>0){checked++;if((dir>0&&g_m30e20>g_m30e50)||(dir<0&&g_m30e20<g_m30e50))aligned++;}
+         if(g_h1e20>0&&g_h1e50>0){checked++;if((dir>0&&g_h1e20>g_h1e50)||(dir<0&&g_h1e20<g_h1e50))aligned++;}
+         if(aligned<InpMTFMinAligned){why="MTF alignment "+IntegerToString(aligned)+"/"+IntegerToString(checked)+"<"+IntegerToString(InpMTFMinAligned);return false;}
+      }
       // Momentum modes need liquid hours; reversion works everywhere (range fades).
       bool liquid=(w==WIN_TOKYO_LONDON||w==WIN_LONDON_NY||w==WIN_LONDON_OPEN||w==WIN_NY_OPEN
                    ||w==WIN_LONDON||w==WIN_NEWYORK);
@@ -5618,7 +5645,15 @@ void DashUpdate(bool force=false)
    DashRowSplit("L_SCORE",0,yL,"Score "+IntegerToString(g_score)+"/"+IntegerToString(g_scoreMax),"Bias "+IntegerToString(g_dirBias)+" "+BiasArrow(g_dirBias),
                 (g_score>=InpMinFilterScore?C_UP_TXT:C_WARN_TXT),BiasColor(g_dirBias));
    DashRow("L_SMC",0,yL,"SMC B/S "+IntegerToString(g_smcScoreBull)+"/"+IntegerToString(g_smcScoreBear)+"  FVG "+(g_fvg?(g_fvgDir>0?"UP":"DN"):"-"),BiasColor(g_smcScoreBull-g_smcScoreBear));
-   DashRow("L_ADV",0,yL,"IFVG "+(g_ifvg?(g_ifvgDir>0?"BULL":"BEAR"):"-")+"  PTB "+(g_ptb?(g_ptbDir>0?"BULL":"BEAR"):"-")+"  MTF "+((g_h1e20>g_h1e50&&g_m15e20>g_m15e50)?"BULL":((g_h1e20<g_h1e50&&g_m15e20<g_m15e50)?"BEAR":"FLAT")),C_TXT);
+   string mtfTxt="off";
+   if(InpUseMTFAlignment)
+   {
+      string t1=(g_m15e20>g_m15e50?"^":(g_m15e20<g_m15e50?"v":"="));
+      string t2=(g_m30e20>g_m30e50?"^":(g_m30e20<g_m30e50?"v":"="));
+      string t3=(g_h1e20>g_h1e50?"^":(g_h1e20<g_h1e50?"v":"="));
+      mtfTxt="M15"+t1+" M30"+t2+" H1"+t3;
+   }
+   DashRow("L_ADV",0,yL,"IFVG "+(g_ifvg?(g_ifvgDir>0?"BULL":"BEAR"):"-")+"  PTB "+(g_ptb?(g_ptbDir>0?"BULL":"BEAR"):"-")+"  MTF "+mtfTxt,C_TXT);
    DashRow("L_HV",0,yL,"HV "+IntegerToString(hs2)+"/"+IntegerToString(InpHVMinScore)+(hvNow?" QUAL":" -")+"  VWAPdev "+DoubleToString(vwapDev,2),(hvNow?C_WARN_TXT:C_TXT2));
    // Ultra-scalp v3: this row mirrors the LIVE engine state (g_gateReason is updated
    // by TryArm every tick), not the legacy filter-score formula.
@@ -5798,12 +5833,13 @@ int OnInit()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))Print("WARNING: MQL trade permission denied - check Allow Algo Trading in EA settings.");
    if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))Print("WARNING: Account forbids expert trading.");
    hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);hM5E20=iMA(eaSymbol,PERIOD_M5,20,0,MODE_EMA,PRICE_CLOSE);hM5E50=iMA(eaSymbol,PERIOD_M5,50,0,MODE_EMA,PRICE_CLOSE);hM5ADX=iADX(eaSymbol,PERIOD_M5,14);
+   if(InpUseMTFAlignment){hM30E20=iMA(eaSymbol,PERIOD_M30,20,0,MODE_EMA,PRICE_CLOSE);hM30E50=iMA(eaSymbol,PERIOD_M30,50,0,MODE_EMA,PRICE_CLOSE);}
    //--- [SIGNAL QUALITY] new indicator handles (sections 4/5/6)
    if(InpUseEMA9)hEMA9=iMA(eaSymbol,PERIOD_M1,InpEMA9Period,0,MODE_EMA,PRICE_CLOSE);
    if(InpUseEMA200)hEMA200=iMA(eaSymbol,PERIOD_M1,InpEMA200Period,0,MODE_EMA,PRICE_CLOSE);
    if(InpUseMACD)hMACD=iMACD(eaSymbol,PERIOD_M1,InpMACDFast,InpMACDSlow,InpMACDSignal,PRICE_CLOSE);
    if((InpUseEMA9&&hEMA9==INVALID_HANDLE)||(InpUseEMA200&&hEMA200==INVALID_HANDLE)||(InpUseMACD&&hMACD==INVALID_HANDLE)){Print("Signal-quality indicator initialization failed");return INIT_FAILED;}
-   if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE||hM5E20==INVALID_HANDLE||hM5E50==INVALID_HANDLE||hM5ADX==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
+   if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE||hM5E20==INVALID_HANDLE||hM5E50==INVALID_HANDLE||hM5ADX==INVALID_HANDLE||(InpUseMTFAlignment&&(hM30E20==INVALID_HANDLE||hM30E50==INVALID_HANDLE))){Print("Indicator initialization failed");return INIT_FAILED;}
    if(!SR_Init()){Print("SR module initialization failed");return INIT_FAILED;}   // [SR]
    g_x=InpPanelX;g_y=InpPanelY;
    if(GlobalVariableCheck("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)))
@@ -5854,7 +5890,8 @@ void OnDeinit(const int reason)
 {
    SR_Deinit();   // [SR] remove every SR chart object before existing cleanup
    EventKillTimer();if(InpPersistState)SaveState();if(g_log!=INVALID_HANDLE){FileFlush(g_log);FileClose(g_log);g_log=INVALID_HANDLE;}WriteWindowReport();WritePerformanceReport();DashDestroy();
-   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);if(hM5E20!=INVALID_HANDLE)IndicatorRelease(hM5E20);if(hM5E50!=INVALID_HANDLE)IndicatorRelease(hM5E50);if(hM5ADX!=INVALID_HANDLE)IndicatorRelease(hM5ADX);if(hEMA9!=INVALID_HANDLE)IndicatorRelease(hEMA9);if(hEMA200!=INVALID_HANDLE)IndicatorRelease(hEMA200);if(hMACD!=INVALID_HANDLE)IndicatorRelease(hMACD);PrintSummary();
+   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);if(hM5E20!=INVALID_HANDLE)IndicatorRelease(hM5E20);if(hM5E50!=INVALID_HANDLE)IndicatorRelease(hM5E50);if(hM5ADX!=INVALID_HANDLE)IndicatorRelease(hM5ADX);
+   if(hM30E20!=INVALID_HANDLE)IndicatorRelease(hM30E20);if(hM30E50!=INVALID_HANDLE)IndicatorRelease(hM30E50);if(hEMA9!=INVALID_HANDLE)IndicatorRelease(hEMA9);if(hEMA200!=INVALID_HANDLE)IndicatorRelease(hEMA200);if(hMACD!=INVALID_HANDLE)IndicatorRelease(hMACD);PrintSummary();
 }
 
 void OnTick()
