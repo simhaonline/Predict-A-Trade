@@ -306,11 +306,11 @@ input double InpExtremeVolumePercentile   = 97.0;
 input double InpExtremeDisplacementATR    = 2.8;
 input int    InpLowLiquidityConfirmBars   = 2;         // persistence required for LOW_LIQUIDITY
 //--- setup-specific minimum NET R:R (section 16; NO universal 1:3)
-input double InpMinNetRR_EMAPullback      = 1.20;
-input double InpMinNetRR_VWAPReversion    = 1.00;
-input double InpMinNetRR_LondonBreakout   = 1.50;
-input double InpMinNetRR_NYMomentum       = 1.50;
-input double InpMinNetRR_ComplexMode      = 1.20;
+input double InpMinNetRR_EMAPullback      = 0.40;      // scalp geometry: TP1 0.4R/SL 0.8R ladder-weighted
+input double InpMinNetRR_VWAPReversion    = 0.30;
+input double InpMinNetRR_LondonBreakout   = 0.60;
+input double InpMinNetRR_NYMomentum       = 0.60;
+input double InpMinNetRR_ComplexMode      = 0.40;
 //--- optional Gold Options/OI context: architecture only, FAIL-OPEN (sections 25/26/48)
 input bool   InpUseOptionsContext         = false;
 input bool   InpRequireOptionsData        = false;
@@ -3385,11 +3385,11 @@ double ComputeConfidence(int dir,ConfidenceBreakdown &out,string &reasonBuf,bool
 //--- 16. setup-specific minimum NET R:R (no universal 1:3)
 double SetupMinNetRR(string setupName)
 {
+   if(StringFind(setupName,"RCV")>=0)return InpRecoveryMinRR;   // recovery keeps its own (stricter, validated separately)
    if(StringFind(setupName,"pullback")>=0)return InpMinNetRR_EMAPullback;
    if(StringFind(setupName,"reversion")>=0)return InpMinNetRR_VWAPReversion;
    if(StringFind(setupName,"London")>=0)return InpMinNetRR_LondonBreakout;
    if(StringFind(setupName,"NY")>=0)return InpMinNetRR_NYMomentum;
-   if(StringFind(setupName,"RCV")>=0)return MathMax(InpRecoveryMinRR,1.0);   // recovery keeps its own (stricter)
    return InpMinNetRR_ComplexMode;
 }
 
@@ -5981,7 +5981,11 @@ int OnInit()
    if(GlobalVariableCheck("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)))
    {int sx=(int)GlobalVariableGet("PAT_X_"+eaSymbol+"_"+IntegerToString(InpMagicNumber));
     int sy=(int)GlobalVariableGet("PAT_Y_"+eaSymbol+"_"+IntegerToString(InpMagicNumber));
-    if(sx>=0&&sy>=0){g_x=sx;g_y=sy;}}
+    // Clamp to the visible chart area: a panel dragged off-screen (or a saved position
+    // from a larger window) would otherwise be invisible with no way to recover.
+    int chartW=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS),chartH=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+    if(sx>=0&&sy>=0&&sx<chartW-200&&sy<chartH-100){g_x=sx;g_y=sy;}
+    else Print("DASHBOARD: saved panel position (",sx,",",sy,") outside this chart - resetting to default");}
    ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
    PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();
    //--- [SIGNAL QUALITY] weight validation + classification warm start (sections 42/44/45)
@@ -5989,6 +5993,7 @@ int OnInit()
    if(g_confTelemetry!="")Print("SIGNAL QUALITY: ",g_confTelemetry);
    g_options.available=false;g_options.timestamp=0;g_options.source="none";   // fail-open until a provider fills it
    UpdateStructureState();UpdateVolumeEngine();UpdateDirectionRegime();UpdateEnvironmentRegime();
+   Print("DASHBOARD: panel at x=",g_x," y=",g_y," width=",g_panelW," height=",g_panelH," (drag header to move; click header to collapse/expand)");
    Print("SIGNAL QUALITY: structure=",StructureStateName(g_structureState)," dirRegime=",DirectionRegimeName(g_dirRegime)," env=",EnvironmentRegimeName(g_envRegime)," vol=",VolumeStateName(g_volumeState)," (p",DoubleToString(g_volumePercentile,0),") threshold=",DoubleToString(EffectiveConfidenceThreshold(),1));
    // [CAPITAL ENGINE] classify once at init + log the profile environment
    g_capitalProfile=GetCapitalProfile();
