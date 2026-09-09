@@ -1205,35 +1205,54 @@ int LicenseHttpPost(string endpoint,string payload,string &response)
    string resultHeaders="";
    string headers="Content-Type: application/json\r\nUser-Agent: PAT-Ultra/2.00\r\n";
    string url=InpLicenseServerURL+endpoint;
-   ResetLastError();
-   int code=WebRequest("POST",url,headers,"",5000,post,len,result,resultHeaders);
-   if(code==-1)
+   for(int attempt=1;attempt<=2;attempt++)   // one quick retry: transient middlebox/IPv6 hiccups
    {
-      // Full diagnosis: older builds report 4014 for a non-whitelisted URL, newer
-      // builds use 5200-5203. Print the exact code so the user's log is actionable.
-      int err=GetLastError();
-      switch(err)
+      ResetLastError();
+      uchar result[];
+      string resultHeaders="";
+      int code=WebRequest("POST",url,headers,"",5000,post,len,result,resultHeaders);
+      if(code==-1)
       {
-         case 4014:
-         case 5200:
-            Print("LICENSE: WebRequest blocked (err ",err,"). FIX: Tools > Options > Expert Advisors > tick 'Allow WebRequest for listed URL' and add exactly  ",InpLicenseServerURL,"   (no trailing slash), click OK, re-attach the EA.");
-            break;
-         case 5201:
-            Print("LICENSE: WebRequest connect failed (err 5201) to ",url,". Check this machine's network / proxy / firewall and test https://license.predictatrade.com/healthz in its browser.");
-            break;
-         case 5202:
-            Print("LICENSE: WebRequest timeout (err 5202): ",url," did not answer in 5 s. If this network prefers IPv6 and has broken IPv6, disable IPv6 or test https://license.predictatrade.com/healthz in this machine's browser.");
-            break;
-         case 5203:
-            Print("LICENSE: WebRequest HTTP error (err 5203) from ",url,". If this persists the server may be down - check https://license.predictatrade.com/healthz.");
-            break;
-         default:
-            Print("LICENSE: WebRequest failed (err ",err,") calling ",url,". Test https://license.predictatrade.com/healthz in this machine's browser and re-attach.");
+         // Full diagnosis: older builds report 4014 for a non-whitelisted URL, newer
+         // builds use 5200-5203. Print the exact code so the user's log is actionable.
+         int err=GetLastError();
+         switch(err)
+         {
+            case 4014:
+            case 5200:
+               Print("LICENSE: WebRequest blocked (err ",err,"). FIX: Tools > Options > Expert Advisors > tick 'Allow WebRequest for listed URL' and add exactly  ",InpLicenseServerURL,"   (no trailing slash), click OK, re-attach the EA.");
+               break;
+            case 5201:
+               Print("LICENSE: WebRequest connect failed (err 5201) to ",url,". Check this machine's network / proxy / firewall and test https://license.predictatrade.com/healthz in its browser.");
+               break;
+            case 5202:
+               Print("LICENSE: WebRequest timeout (err 5202): ",url," did not answer in 5 s. If this network prefers IPv6 and has broken IPv6, disable IPv6 or test https://license.predictatrade.com/healthz in this machine's browser.");
+               break;
+            case 5203:
+               Print("LICENSE: WebRequest HTTP error (err 5203) from ",url,". If this persists the server may be down - check https://license.predictatrade.com/healthz.");
+               break;
+            default:
+               Print("LICENSE: WebRequest failed (err ",err,") calling ",url,". Test https://license.predictatrade.com/healthz in this machine's browser and re-attach.");
+         }
+         if(attempt==1){Sleep(300);continue;}
+         return 0;
       }
-      return 0;
+      if(code<200||code>599)
+      {
+         // Not a valid HTTP status (e.g. 1009): the Go server cannot emit one, so a
+         // middlebox answered - AV HTTPS-scanner, system proxy, captive portal - or
+         // the connection was cut mid-response. Retry once, then report transport
+         // failure so the grace-period logic keeps trading alive.
+         Print("LICENSE: ",url," answered with non-HTTP status ",code," (err ",GetLastError(),") - a middlebox (AV HTTPS scan / proxy / captive portal) or unstable network path is interfering; retrying once");
+         if(attempt==1){Sleep(300);continue;}
+         return 0;
+      }
+      response=CharArrayToString(result,0,WHOLE_ARRAY,CP_UTF8);
+      if(code!=200)
+         Print("LICENSE: server HTTP ",code," body: ",StringSubstr(response,0,200));
+      return code;
    }
-   response=CharArrayToString(result,0,WHOLE_ARRAY,CP_UTF8);
-   return code;
+   return 0;   // not reached; satisfies the compiler
 }
 
 //--- activate this machine/account; returns true when the seat is granted.
@@ -1294,9 +1313,26 @@ void CheckLicense()
 
    if(code!=200)
    {
-      g_licenseActive=false;
-      g_licenseLastReason="http_"+IntegerToString(code);
-      Print("LICENSE: server returned HTTP ",code);
+      // Transport-level failure (timeout, reset, non-HTTP middlebox status such as
+      // 1009) or an unexpected server code. This is NOT a license revocation - the
+      // fail-safe rule: only a parsed "valid":false body may deactivate. Treat as
+      // server-unreachable and let the grace period carry the EA.
+      g_licenseLastReason="transport_http_"+IntegerToString(code);
+      if(g_licenseActive)
+      {
+         if(g_gracePeriodDeadline==0)
+         {
+            g_gracePeriodDeadline=TimeCurrent()+InpLicenseGraceMinutes*60;
+            Print("LICENSE: server unreachable (HTTP ",code,") - grace period until ",TimeToString(g_gracePeriodDeadline,TIME_DATE|TIME_MINUTES));
+         }
+         if(TimeCurrent()>g_gracePeriodDeadline)
+         {
+            g_licenseActive=false;
+            g_licenseLastReason="grace_expired";
+            Print("LICENSE: grace period expired - trading blocked");
+         }
+      }
+      else Print("LICENSE: server unreachable (HTTP ",code,") - will retry in 10 min");
       return;
    }
 
