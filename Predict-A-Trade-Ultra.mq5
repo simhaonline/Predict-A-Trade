@@ -160,7 +160,7 @@ input double InpRiskStepDownOnDD          = 0.15;
 input int    InpMaxConsecutiveLosses      = 10;       // pause only after 3 straight; risk decays 30% per loss before that
 input int    InpMaxTradesPerDay           = 100;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
-input double InpMinLotMaxRiskPct          = 1.5;       // LEGACY/MANUAL: min-lot ceiling when AutoCapitalProfile=false (else profile ceiling)
+input double InpMinLotMaxRiskPct          = 5.0;       // MANUAL: min-lot ceiling when AutoCapitalProfile=false (else profile ceiling: MICRO 5% / STD 3% / PRO 2%)
 input double InpMaxAggregateOpenRiskPct   = 2.5;
 input double InpMaxDirectionalRiskPct     = 1.5;
 input ENUM_BREAKER_ACTION InpBreakerAction= BREAKER_CLOSE_ALL;
@@ -3899,14 +3899,20 @@ double GetProfileWindowRiskPct()
 }
 double GetProfileMinLotRiskCeilingPct()
 {
+   //--- [FIX min-lot] raised so the 1-min-lot fallback can ALWAYS trade on small accounts.
+   //--- The fallback exists precisely so sub-threshold accounts trade at min lot; if the
+   //--- ceiling sat below what 1 min lot risks, the account was permanently silenced
+   //--- (MIN_LOT_RISK_TOO_HIGH) - contradicting "small to large accounts trade accordingly".
+   //--- Min-lot gold risk is only cents-to-low-dollars, so 2-5% is safe and still guards
+   //--- tiny accounts from absurd over-risk.
    if(!InpAutoCapitalProfile)return InpMinLotMaxRiskPct;
    switch(GetCapitalProfile())
    {
-      case CAPITAL_MICRO:return 1.00;
-      case CAPITAL_STANDARD:return 0.75;
-      case CAPITAL_PRO:return 0.50;
+      case CAPITAL_MICRO:return 5.00;
+      case CAPITAL_STANDARD:return 3.00;
+      case CAPITAL_PRO:return 2.00;
    }
-   return 0.75;
+   return 3.00;
 }
 int GetProfileMaxPositions()
 {
