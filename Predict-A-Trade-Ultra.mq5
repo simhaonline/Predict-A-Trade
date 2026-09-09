@@ -2517,6 +2517,16 @@ void EvaluateFilters()
 void EvaluateScalpSignal()
 {
    g_scalpSignal=0;g_scalpWhy="";
+   //--- [LIVE DIAG] unconditional readiness probe (every ~20s), prints EVEN when not ready,
+   //--- so a silent engine shows ready=0/atr=0 instead of nothing. Pairs with SCALP_DIAG.
+   static long _lastRdyMs=0;
+   if(TimeLocal()*1000-_lastRdyMs>20000)
+   {
+      _lastRdyMs=TimeLocal()*1000;
+      Print("SCALP_RDY ready=",g_indicatorsReady," atr=",DoubleToString(g_atr,2),
+            " ema20=",DoubleToString(g_ema20,broker.digits)," rsi=",DoubleToString(g_rsi,1),
+            " vwap=",DoubleToString(g_vwap,broker.digits)," m5e20=",DoubleToString(g_m5e20,broker.digits));
+   }
    //--- [DIAG] every 200 bars in the tester, print the signal-layer preconditions so
    //--- a zero-signal backtest shows exactly which input is dead (0 cache = M5/H1 data
    //--- never arrived, VWAP=0 = anchor problem, etc.)
@@ -2554,7 +2564,7 @@ void EvaluateScalpSignal()
    if(vwapRef>0)
    {
       double dev=(c1-vwapRef)/g_atr;
-      bool extUp=(dev>=1.5),extDn=(dev<=-1.5);
+      bool extUp=(dev>=1.2),extDn=(dev<=-1.2);   // [FREQ] 1.5 sigma was near-never on gold M1; 1.2 fires the reversion book
       bool confDn=(c1<o1)||(c1<vwapRef);          // close back below the mean OR a red bar
       bool confUp=(c1>o1)||(c1>vwapRef);          // close back above the mean OR a green bar
       // [FIX win%] Reversion must NOT fight a strong trend: a down-extension fade
@@ -2638,11 +2648,16 @@ void EvaluateScalpSignal()
    // back across it (a fresh resumption). No higher-TF dependency -> robust on gold M1.
    {
       double dev=(c1-g_ema20)/g_atr;
-      bool stretchedUp=(dev>=0.6), stretchedDn=(dev<=-0.6);
+      bool stretchedUp=(dev>=0.5), stretchedDn=(dev<=-0.5);   // [FREQ] 0.6->0.5: more frequent pullback reversion
       bool resumedUp=(c1>o1)&&(iClose(eaSymbol,PERIOD_M1,2)<g_ema20);   // dipped below, now reclaiming up
       bool resumedDn=(c1<o1)&&(iClose(eaSymbol,PERIOD_M1,2)>g_ema20);   // popped above, now reclaiming down
-      if(stretchedDn&&resumedUp&&g_ema20>g_ema50){g_scalpSignal=5;g_scalpWhy="EMA20 reversion LONG";return;}
-      if(stretchedUp&&resumedDn&&g_ema20<g_ema50){g_scalpSignal=-5;g_scalpWhy="EMA20 reversion SHORT";return;}
+      // [FREQ] removed the hard g_ema20>|<g_ema50 gate: it made the baseline silent in
+      // persistent trends (price stays one side of EMA20, so the required stretch-AND
+      // -reclaim rarely lined up with the trend condition). The directional reclaim
+      // (resumedUp/resumedDn) already encodes trend-alignment via price action, so the
+      // baseline is now genuinely always-on across all sessions and regimes.
+      if(stretchedDn&&resumedUp){g_scalpSignal=5;g_scalpWhy="EMA20 reversion LONG";return;}
+      if(stretchedUp&&resumedDn){g_scalpSignal=-5;g_scalpWhy="EMA20 reversion SHORT";return;}
    }
    //--- [LIVE DIAG] throttled (every ~20s). The tester-only SIGDIAG never prints on
    //--- live, so when g_indicatorsReady is true but g_scalpSignal stays 0 this line
