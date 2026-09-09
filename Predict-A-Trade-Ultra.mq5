@@ -190,7 +190,11 @@ input double InpRecoverySpreadQualityMultiplier = 0.80; // recovery requires thi
 input double InpCatastropheNoSLRiskPct    = 5.0;       // no-SL open positions count as this % risk (conservative policy)
 
 input group "=== BROKER / COST MODEL ==="
-input int    InpMaxSpreadPoints           = 35;      // hard sanity cap; ADAPTIVE GATE primary when InpUseAdaptiveSpreadGate=true
+input int    InpMaxSpreadPoints           = 35;      // hard sanity fallback only - PERCENTAGE gate is primary (below)
+input double InpMaxSpreadPctOfSL          = 100.0;   // [PERCENTAGE GATE] spread may consume at most this % of the SL distance (broker-adaptive; geometry auto-widens)
+input double InpMaxSlippagePctOfATR       = 5.0;     // avg slippage <= this % of ATR (percentage form)
+input double InpExtremeSlippagePctOfATR   = 12.0;    // last-fill slippage extreme <= this % of ATR
+input double InpDisorderSlipPctOfATR      = 10.0;    // disorder slippage trigger <= this % of ATR
 input double InpSpreadSpikeRatio          = 2.0;
 input double InpMaxSpreadPercentile       = 90.0;     // p85 was below this broker's normal spread range
 input int    InpMaxSlippagePoints         = 25;
@@ -2227,6 +2231,54 @@ void PushSlippage(double s)
 }
 double SlippagePercentile(){ return PercentileRank(g_slipBuf,g_slipCnt,g_lastSlipPts); }
 
+//--- [PERCENTAGE GATES] broker-adaptive forms: spread measured against the trade's SL
+//--- distance (the risk the spread is paid against), slippage against ATR (market-
+//--- adaptive). These are the PRIMARY gates; the absolute-point inputs are fallbacks.
+double AdaptiveSpreadCap(double slDist)
+{
+   //--- percentage-of-SL budget in price terms
+   double pctCap=(g_atr>0&&slDist>0?slDist*InpMaxSpreadPctOfSL/100.0:0);
+   double pctPts=(broker.point>0&&pctCap>0?pctCap/broker.point:0);
+   //--- the absolute legacy cap remains a last-resort ceiling: take the LOOSER of the two
+   //--- so no broker with a legitimately wider (but economically viable) feed is blocked
+   return MathMax((double)InpMaxSpreadPoints*g_ptScale,pctPts);
+}
+
+//--- [BROKER ADAPTATION] scale the scalp geometry so a wide-spread broker keeps
+//--- producing signals: the ladder (SL + TPs) widens proportionally to the spread's
+//--- share of ATR, keeping the risk:reward RATIO constant while risk-% sizing holds
+//--- the money risk constant. No signal is lost to fixed absolute costs.
+double SpreadCompensationFactor()
+{
+   if(g_atr<=0||broker.point<=0)return 1.0;
+   double spreadPrice=SpreadPoints()*broker.point;
+   //--- baseline: spread should be ~25% of ATR on a good feed
+   double ratio=spreadPrice/(0.25*g_atr);
+   return MathMin(2.0,MathMax(1.0,ratio));
+}
+
+double AdaptiveMaxAvgSlippagePts()
+{
+   //--- percentage-of-ATR form; legacy absolute becomes the fallback when ATR is unknown
+   if(g_atr<=0)return InpMaxAverageSlippagePoints;
+   double pts=(g_atr*InpMaxSlippagePctOfATR/100.0)/broker.point;
+   return MathMax(pts,3.0);
+}
+
+double AdaptiveExtremeSlippagePts()
+{
+   if(g_atr<=0)return InpExtremeSlippagePoints;
+   double pts=(g_atr*InpExtremeSlippagePctOfATR/100.0)/broker.point;
+   return MathMax(pts,(double)InpExtremeSlippagePoints);
+}
+
+double AdaptiveDisorderSlipPts()
+{
+   if(g_atr<=0)return InpDisorderSlipPts;
+   double pts=(g_atr*InpDisorderSlipPctOfATR/100.0)/broker.point;
+   return MathMax(pts,InpDisorderSlipPts);
+}
+
 //--- [SPREAD] adaptive multi-condition relative gate (section 26). Reuses the existing
 //--- rolling spread buffer/avg/percentile; warmup falls back to the legacy fixed cap.
 //--- Returns true when spread conditions allow a NEW ENTRY. Emergency closes never call this.
@@ -2246,8 +2298,9 @@ bool AdaptiveSpreadOK(double atr,string &why)
    // (3) spike vs rolling baseline (existing average reused; NOT a self-normalizing
    // widening allowance - the fixed sanity cap still binds above).
    if(g_spreadAvg>0&&spPts>g_spreadAvg*InpSpreadBaselineMultiplier){why="SPREAD_RELATIVE_HIGH";g_spreadRejects++;return false;}
-   // Absolute last-resort sanity cap: legacy fixed ceiling (broker-independent guard).
-   if(spPts>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";g_spreadRejects++;return false;}
+   // Absolute last-resort sanity cap: percentage-of-SL budget (SL = InpSL_ATR_Multiplier x ATR).
+   double slProj=MathMax(g_atr,MinTradeDistance())*SpreadCompensationFactor()*(InpSimpleScalpMode?SCALP_SL_ATR:InpSL_ATR_Multiplier);
+   if(spPts>AdaptiveSpreadCap(slProj)){why="spread hard cap";g_spreadRejects++;return false;}
    return true;
 }
 
@@ -3542,9 +3595,9 @@ bool IsDisorder()
    // relative spike must ALSO breach the absolute hard cap before halting. Realised
    // slippage stays an independent trigger.
    double sp=SpreadPoints();
-   if(SpreadPercentile()>=InpDisorderSpreadPct && sp>InpMaxSpreadPoints*g_ptScale)
+   if(SpreadPercentile()>=InpDisorderSpreadPct && sp>AdaptiveSpreadCap(MathMax(g_atr,MinTradeDistance())*SpreadCompensationFactor()*(InpSimpleScalpMode?SCALP_SL_ATR:InpSL_ATR_Multiplier)))
    {g_disorderUntil=now+InpDisorderCooldownMinutes*60;return true;}
-   if(g_slipCnt>=5&&g_slipAvg>=InpDisorderSlipPts)
+   if(g_slipCnt>=5&&g_slipAvg>=AdaptiveDisorderSlipPts())
    {g_disorderUntil=now+InpDisorderCooldownMinutes*60;return true;}
    return false;
 }
@@ -4267,12 +4320,14 @@ bool PreflightNewTrade(MqlTradeRequest &request,MqlTradeCheckResult &check,strin
 //--- Emergency closes keep their own explicit deviation (never restricted by this).
 int AdaptiveDeviationPoints()
 {
-   int extreme=(int)InpExtremeSlippagePoints;
+   //--- [PERCENTAGE FORM] deviation budget = % of ATR (broker-adaptive); the absolute
+   //--- legacy ceiling remains as the bound when ATR is unknown. CLOSING operations use
+   //--- the fixed legacy deviation so emergency exits are never restricted.
+   int extreme=(int)AdaptiveExtremeSlippagePts();
    if(g_slipCnt<5)return (int)MathMin(InpMaxSlippagePoints,extreme);   // warmup -> legacy fallback
-   // Mature data: learned execution profile, bounded by the legacy ceiling and the
-   // pathological cap. Respect point scale for 3-digit feeds.
    double avg=g_slipAvg;   // measured in points already (PushSlippage)
-   int dev=(int)MathMax(3.0,MathMin((double)InpMaxSlippagePoints,MathMin(extreme-1,MathMax(avg*2.0,InpMaxSlippagePoints*0.4))));
+   double pctCap=(g_atr>0?(g_atr*InpMaxSlippagePctOfATR/100.0)/broker.point:InpMaxSlippagePoints);
+   int dev=(int)MathMax(3.0,MathMin(pctCap,MathMin(extreme-1,MathMax(avg*2.0,pctCap*0.4))));
    return dev;
 }
 
@@ -4402,7 +4457,7 @@ double NearestLiquidityTarget(int dir,double entry,int lookback,double fallback)
 //---                 TP1 = VWAP (the mean) - the highest-probability target
 double ScalpStopDistance(int dir,double entry,double &slPrice)
 {
-   double atr=MathMax(g_atr,MinTradeDistance());
+   double atr=MathMax(g_atr,MinTradeDistance())*SpreadCompensationFactor();   // [BROKER ADAPTATION] widen geometry on wide-spread feeds
    if(g_scalpSignal==2||g_scalpSignal==-2)   // VWAP reversion: beyond the extreme + 0.45 ATR
    {
       double ext=(dir>0?iLow(eaSymbol,PERIOD_M1,1):iHigh(eaSymbol,PERIOD_M1,1));
@@ -4418,7 +4473,7 @@ double ScalpStopDistance(int dir,double entry,double &slPrice)
 }
 double ScalpTarget1(int dir,double entry)
 {
-   double atr=MathMax(g_atr,MinTradeDistance());
+   double atr=MathMax(g_atr,MinTradeDistance())*SpreadCompensationFactor();   // [BROKER ADAPTATION]
    if((g_scalpSignal==2||g_scalpSignal==-2)&&g_vwap>0)
    {
       // reversion: target the mean (VWAP), min 0.6 ATR away
@@ -4483,7 +4538,7 @@ bool NetProfitValid(int dir,double entry,double target,double lots,double minMon
 
 void BuildThreeTargets(int dir,double entry,double sl,double lots,ENUM_WINDOW_ID w,bool hv,double &tp1,double &tp2,double &tp3)
 {
-   double atr=MathMax(g_atr,MinTradeDistance()),k=RegimeTPMultiplier(w,hv);
+   double atr=MathMax(g_atr,MinTradeDistance())*SpreadCompensationFactor(),k=RegimeTPMultiplier(w,hv);   // [BROKER ADAPTATION]
    double d1=MathMax(InpTP1_ATR_Floor*atr,MathMin(InpTP1_ATR_Cap*atr,0.55*atr))*k;
    double d2=MathMax(InpTP2_ATR_Floor*atr,MathMin(InpTP2_ATR_Cap*atr,1.10*atr))*k;
    double d3=MathMax(InpTP3_ATR_Floor*atr,MathMin(InpTP3_ATR_Cap*atr,1.85*atr))*(hv?1.05:1.0);
@@ -4591,8 +4646,12 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    if(g_newsBlocked||ServerNow()<g_newsBlockedUntil){why="news/stabilization";return false;}
    if(InSwapDangerWindow()){why="swap/rollover protection";return false;}
    double sp=SpreadPoints();
-   if(sp>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";return false;}
-   if(sp>=(InpMaxSpreadPoints+20)*g_ptScale){why="spread extreme";return false;}   // > hard cap+20 = broken feed
+   //--- [PERCENTAGE GATE] broker-adaptive: spread budget = % of the projected SL distance
+   //--- (SCALP_SL_ATR x ATR in simple mode; InpSL_ATR_Multiplier x ATR in complex mode)
+   double projSL=MathMax(g_atr,MinTradeDistance())*SpreadCompensationFactor()*(InpSimpleScalpMode?SCALP_SL_ATR:InpSL_ATR_Multiplier);
+   double spCap=AdaptiveSpreadCap(projSL);
+   if(sp>spCap){why="spread hard cap (cap "+DoubleToString(spCap,0)+"pt)";return false;}
+   if(sp>=(spCap+20)*g_ptScale){why="spread extreme";return false;}   // broken feed
    // [SPREAD] adaptive relative gate after warmup (section 26): ATR-ratio + percentile
    // + spike conditions; emergency closes never pass through here.
    if(!AdaptiveSpreadOK(g_atr,why))return false;
@@ -4639,8 +4698,8 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    }
    RefreshWindowGating(w);if(g_ws[w].disabled){why="window expectancy disabled";return false;}
    if(IsDisorder()){why="market disorder";return false;}
-   if(g_slipCnt>=5&&g_slipAvg>InpMaxAverageSlippagePoints){why="slippage quality gate";return false;}
-   if(g_lastSlipPts>=InpExtremeSlippagePoints&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";return false;}
+   if(g_slipCnt>=5&&g_slipAvg>AdaptiveMaxAvgSlippagePts()){why="slippage quality gate";return false;}
+   if(g_lastSlipPts>=AdaptiveExtremeSlippagePts()&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";return false;}
    if(!ExternalDataReady(why))return false;
    double spp=SpreadPercentile();if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
    if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
@@ -5283,7 +5342,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          else slip=0;
       }
       PushSlippage(slip);
-      if(MathAbs(slip)>=InpExtremeSlippagePoints){g_disorderUntil=ServerNow()+InpSlippageCooldownMinutes*60;}
+      if(MathAbs(slip)>=AdaptiveExtremeSlippagePts()){g_disorderUntil=ServerNow()+InpSlippageCooldownMinutes*60;}
       ENUM_WINDOW_ID w=WIN_NONE;string setup="";string c=HistoryDealGetString(trans.deal,DEAL_COMMENT);
       bool isRecovery=(StringFind(c,"|RCV")>=0);
       {
@@ -5305,7 +5364,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
             // Charge the per-window risk budget for the ACTUAL fill (each straddle layer separately),
             // so partial/layered fills can never exceed the window budget.
             if(!isRecovery&&w>WIN_NONE&&w<WIN_COUNT&&sl>0){double rrM=CalculateRealTradeRiskMoney(dir,fv,price,sl);g_windowRiskUsed[w]+=(rrM>0?rrM:PriceMoveMoney(price-sl,fv)+ExpectedAllInCost(fv));}   // [COST BASIS] same authoritative engine as sizing
-            if(InpCloseOnExtremeSlippage&&MathAbs(slip)>=InpExtremeSlippagePoints)ClosePositionSafe(ticket);
+            if(InpCloseOnExtremeSlippage&&MathAbs(slip)>=AdaptiveExtremeSlippagePts())ClosePositionSafe(ticket);
          }
                   if(!isRecovery)
          {
@@ -5995,7 +6054,7 @@ int OnInit()
    UpdateStructureState();UpdateVolumeEngine();UpdateDirectionRegime();UpdateEnvironmentRegime();
    Print("DASHBOARD: panel at x=",g_x," y=",g_y," width=",g_panelW," height=",g_panelH," (drag header to move; click header to collapse/expand)");
    Print("SIGNAL QUALITY: structure=",StructureStateName(g_structureState)," dirRegime=",DirectionRegimeName(g_dirRegime)," env=",EnvironmentRegimeName(g_envRegime)," vol=",VolumeStateName(g_volumeState)," (p",DoubleToString(g_volumePercentile,0),") threshold=",DoubleToString(EffectiveConfidenceThreshold(),1));
-   Print("TRADE GATES ACTIVE: spread hard cap ",InpMaxSpreadPoints,"pt (Xelans ECN runs 35-45pt - widen InpMaxSpreadPoints if your broker's normal spread exceeds it) | confidence ",DoubleToString(InpMinConfidenceScore,0),"+ gap ",DoubleToString(InpMinDirectionalConfidenceGap,0)," | netRR per setup | consecutive-loss decay x0.70/loss (floor ",DoubleToString(InpRiskFloorPct,2),"%)");
+   Print("TRADE GATES (PERCENTAGE/ADAPTIVE): spread <= ",DoubleToString(InpMaxSpreadPctOfSL,0),"% of SL distance (projected cap computed live from ATR) | slippage avg <= ",DoubleToString(InpMaxSlippagePctOfATR,1),"% ATR | confidence ",DoubleToString(InpMinConfidenceScore,0),"+ gap ",DoubleToString(InpMinDirectionalConfidenceGap,0)," | netRR per setup | loss-decay x0.70/loss (floor ",DoubleToString(InpRiskFloorPct,2),"%)");
    // [CAPITAL ENGINE] classify once at init + log the profile environment
    g_capitalProfile=GetCapitalProfile();
    Print("CAPITAL ENGINE: profile=",CapitalProfileName(g_capitalProfile)," equity=",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)," ",broker.currency," equityUSD=",DoubleToString(GetEquityUSD(),2)," capitalBase=",DoubleToString(GetConservativeCapitalBase(),2)," baseRisk=",DoubleToString(GetProfileBaseRiskPct(),3),"% aggregate=",DoubleToString(GetProfileAggregateRiskPct(),2),"% maxPositions=",GetProfileMaxPositions(),(g_usdConvertNote!=""?" ["+g_usdConvertNote+"]":""));
