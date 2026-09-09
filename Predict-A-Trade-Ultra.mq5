@@ -488,7 +488,7 @@ input bool   InpEnableMobileCommands  = true;  // MT5 Mobile command bridge (pen
 
 input group "=== SUPPORT & RESISTANCE (HTF ZONES) ==="
 input bool            InpUseSRZones              = true;             // master switch; false = bit-identical legacy build
-input ENUM_SR_MODE    InpSRMode                  = SR_SOFT_FILTER;   // advisory / soft wall filter / hard headroom filter
+input ENUM_SR_MODE    InpSRMode                  = SR_ADVISORY;      // advisory (default: informs SL/TP snapping, never vetoes entries)
 input int             InpSRRefreshSeconds        = 15;               // throttled rebuild interval
 input bool            InpSRRebuildOnNewHTFBar    = true;             // also rebuild when any SR timeframe opens a bar
 input ENUM_TIMEFRAMES InpSR_TF1                  = PERIOD_M15;
@@ -1434,6 +1434,20 @@ double g_armTp1=0,g_armTp2=0,g_armTp3=0;bool g_armValid=false;
 datetime g_newsChecked=0,g_nextNewsTime=0,g_newsBlockedUntil=0,g_disorderUntil=0;
 int      g_disorderFreezeSecondsToday=0;   // [B7] daily freeze budget
 int      g_mtfAligned=0;                    // [MTF-Soft] higher-TF stacks agreeing with the current candidate
+
+//--- [DIAG] tester rejection histogram: counts every gate veto so a zero-trade
+//--- backtest prints exactly WHY (PrintSummary at test end)
+#define GATE_HIST_MAX 32
+string   g_gateHistNames[GATE_HIST_MAX];
+long     g_gateHistCounts[GATE_HIST_MAX];
+int      g_gateHistN=0;
+void GateHist(string reason)
+{
+   if(!MQLInfoInteger(MQL_TESTER))return;
+   if(reason=="")reason="(blank)";
+   for(int i=0;i<g_gateHistN;i++)if(g_gateHistNames[i]==reason){g_gateHistCounts[i]++;return;}
+   if(g_gateHistN<GATE_HIST_MAX){g_gateHistNames[g_gateHistN]=reason;g_gateHistCounts[g_gateHistN]=1;g_gateHistN++;}
+}
 string g_nextNewsName="",g_gateReason="";
 bool g_newsBlocked=false,g_paused=false;
 
@@ -1959,7 +1973,7 @@ bool AdaptiveSpreadOK(double atr,string &why)
 {
    if(!InpUseAdaptiveSpreadGate)return true;   // legacy behavior only
    if(g_spreadCnt<InpSpreadWarmupSamples)return true;   // warmup: legacy fixed gate governs
-   if(atr<=0){why="spread: ATR unavailable";return false;}
+   if(atr<=0){why="spread: ATR unavailable";GateHist("spread: ATR unavailable");return false;}
    double spPts=SpreadPoints();
    double spreadPrice=spPts*broker.point;
    double spreadToATRPct=spreadPrice/atr*100.0;
@@ -2251,7 +2265,7 @@ void RefreshFMPMacro(bool force=false)
 bool ExternalDataReady(string &why)
 {
    if(!InpRequireExternalData)return true;
-   if(InpUseFMP&&!g_usdAvailable&&!g_eurAvailable){why="FMP macro unavailable";return false;}
+   if(InpUseFMP&&!g_usdAvailable&&!g_eurAvailable){why="FMP macro unavailable";GateHist("FMP macro unavailable");return false;}
    return true;
 }
 
@@ -4160,11 +4174,11 @@ double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv)
 
 bool RiskRoom(double newRisk,int dir,ENUM_WINDOW_ID w,string &why)
 {
-   double eq=AccountInfoDouble(ACCOUNT_EQUITY);if(eq<=0){why="bad equity";return false;}
+   double eq=AccountInfoDouble(ACCOUNT_EQUITY);if(eq<=0){why="bad equity";GateHist("bad equity");return false;}
    // [CAPITAL ENGINE] profile limits in Auto mode; identical legacy inputs when false.
-   if((OpenRiskMoney()+newRisk)/eq*100.0>GetProfileAggregateRiskPct()){why="aggregate risk cap";return false;}
-   if((OpenRiskMoney(dir)+newRisk)/eq*100.0>GetProfileDirectionalRiskPct()){why="direction risk cap";return false;}
-   if(g_windowRiskUsed[w]+newRisk>eq*GetProfileWindowRiskPct()/100.0){why="window risk budget";return false;}
+   if((OpenRiskMoney()+newRisk)/eq*100.0>GetProfileAggregateRiskPct()){why="aggregate risk cap";GateHist("aggregate risk cap");return false;}
+   if((OpenRiskMoney(dir)+newRisk)/eq*100.0>GetProfileDirectionalRiskPct()){why="direction risk cap";GateHist("direction risk cap");return false;}
+   if(g_windowRiskUsed[w]+newRisk>eq*GetProfileWindowRiskPct()/100.0){why="window risk budget";GateHist("window risk budget");return false;}
    return true;
 }
 
@@ -4377,30 +4391,30 @@ string MakeSetupId(int dir,ENUM_WINDOW_ID w)
 bool FreshSetup(int dir,ENUM_WINDOW_ID w,string &id,string &why)
 {
    id=MakeSetupId(dir,w);if(!InpOncePerValidatedEvent)return true;
-   string last=(dir>0?g_lastSetupBuy[w]:g_lastSetupSell[w]);if(id==last){why="duplicate setup";return false;}
-   datetime now=ServerNow();if(g_lastWindowEntry[w]>0&&now-g_lastWindowEntry[w]<InpMinSecondsBetweenEntries){why="entry spacing";return false;}
-   if(g_lastWindowEntry[w]>0&&iTime(eaSymbol,PERIOD_M1,1)-g_lastWindowEntry[w]<InpMinBarsFreshStructure*60){why="fresh-structure spacing";return false;}
-   if(g_windowSignals[w]>=InpMaxSignalsPerWindow){why="window signal cap";return false;}return true;
+   string last=(dir>0?g_lastSetupBuy[w]:g_lastSetupSell[w]);if(id==last){why="duplicate setup";GateHist("duplicate setup");return false;}
+   datetime now=ServerNow();if(g_lastWindowEntry[w]>0&&now-g_lastWindowEntry[w]<InpMinSecondsBetweenEntries){why="entry spacing";GateHist("entry spacing");return false;}
+   if(g_lastWindowEntry[w]>0&&iTime(eaSymbol,PERIOD_M1,1)-g_lastWindowEntry[w]<InpMinBarsFreshStructure*60){why="fresh-structure spacing";GateHist("fresh-structure spacing");return false;}
+   if(g_windowSignals[w]>=InpMaxSignalsPerWindow){why="window signal cap";GateHist("window signal cap");return false;}return true;
 }
 
 bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
 {
-   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)||!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)||!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)||!AccountInfoInteger(ACCOUNT_TRADE_EXPERT)){why="trading disabled";return false;}
-   if(g_paused){why="manual pause (F)";return false;}
-   if(ShouldStopTrading()){why="risk breaker";return false;}if(WeekendOrRollover()){why="weekend/rollover";return false;}
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)||!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)||!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)||!AccountInfoInteger(ACCOUNT_TRADE_EXPERT)){why="trading disabled";GateHist("trading disabled");return false;}
+   if(g_paused){why="manual pause (F)";GateHist("manual pause (F)");return false;}
+   if(ShouldStopTrading()){why="risk breaker";GateHist("risk breaker");return false;}if(WeekendOrRollover()){why="weekend/rollover";GateHist("weekend/rollover");return false;}
    bool tr=false;w=CurrentWindow(tr);
-   if(InpUseSessionFilter&&!tr){why="out of enabled session";return false;}
-   if(w==WIN_NONE&&InpUseSessionFilter){why="no opportunity window";return false;}   // [C8] filter OFF: WIN_NONE is a neutral window, not a veto
-   if(g_newsBlocked||ServerNow()<g_newsBlockedUntil){why="news/stabilization";return false;}
-   if(InSwapDangerWindow()){why="swap/rollover protection";return false;}
+   if(InpUseSessionFilter&&!tr){why="out of enabled session";GateHist("out of enabled session");return false;}
+   if(w==WIN_NONE&&InpUseSessionFilter){why="no opportunity window";GateHist("no opportunity window");return false;}   // [C8] filter OFF: WIN_NONE is a neutral window, not a veto
+   if(g_newsBlocked||ServerNow()<g_newsBlockedUntil){why="news/stabilization";GateHist("news/stabilization");return false;}
+   if(InSwapDangerWindow()){why="swap/rollover protection";GateHist("swap/rollover protection");return false;}
    double sp=SpreadPoints();
    //--- [PERCENTAGE GATE] broker-adaptive: spread budget = % of the projected SL distance
    //--- (SCALP_SL_ATR x ATR in simple mode; InpSL_ATR_Multiplier x ATR in complex mode)
    double projSL=g_atr*SpreadCompensationFactor()*(InpSimpleScalpMode?SCALP_SL_ATR:InpSL_ATR_Multiplier);
    double spCap=AdaptiveSpreadCap(projSL);
    g_lastSpreadCapPts=spCap;   // dashboard display
-   if(sp>spCap){why="spread hard cap (cap "+DoubleToString(spCap,0)+"pt)";return false;}
-   if(sp>=(spCap+20)*g_ptScale){why="spread extreme";return false;}   // broken feed
+   if(sp>spCap){why="spread hard cap (cap "+DoubleToString(spCap,0)+"pt)";GateHist("spread hard cap (cap "+DoubleToString(spCap,0)+"pt)");return false;}
+   if(sp>=(spCap+20)*g_ptScale){why="spread extreme";GateHist("spread extreme");return false;}   // broken feed
    // [SPREAD] adaptive relative gate after warmup (section 26): ATR-ratio + percentile
    // + spike conditions; emergency closes never pass through here.
    if(!AdaptiveSpreadOK(g_atr,why))return false;
@@ -4408,7 +4422,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    //--- [PERCENTAGE] ATR floor as % of mid-price: broker/digit-independent dead-market filter
    double mid=(SymbolInfoDouble(eaSymbol,SYMBOL_BID)+SymbolInfoDouble(eaSymbol,SYMBOL_ASK))/2.0;
    double atrFloorPrice=mid*InpMinATRPctOfPrice/100.0;
-   if(g_atr<atrFloorPrice){why="ATR chop";return false;}
+   if(g_atr<atrFloorPrice){why="ATR chop";GateHist("ATR chop");return false;}
    // ============ ULTRA-SCALP SIMPLE PATH (default) ============
    // Momentum + spread + risk. The multi-filter machinery below is only for
    // InpSimpleScalpMode=false. A scalp engine must fire on clean setups, not
@@ -4418,7 +4432,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       // Ultra-scalp v3: four signal modes (VWAP reversion, London breakout, NY momentum,
       // EMA pullback) computed once per M1 bar in EvaluateScalpSignal().
       int want=(g_scalpSignal>0?1:-1);
-      if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";return false;}
+      if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";GateHist("no scalp signal ("+g_scalpWhy+")");return false;}
       setup=g_scalpWhy;
       //--- [MTF-Soft] higher-TF stacks act through the confidence score (bonus/penalty),
       //--- NOT as a hard veto: an M1 setup with 0/3 alignment still trades (smaller
@@ -4434,13 +4448,13 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       bool liquid=(w==WIN_TOKYO_LONDON||w==WIN_LONDON_NY||w==WIN_LONDON_OPEN||w==WIN_NY_OPEN
                    ||w==WIN_LONDON||w==WIN_NEWYORK);
       if((g_scalpSignal==1||g_scalpSignal==-1||g_scalpSignal==3||g_scalpSignal==-3)&&!liquid)
-      {why="momentum signal in thin session";return false;}
+      {why="momentum signal in thin session";GateHist("momentum signal in thin session");return false;}
       // Anti-stacking: no second scalp same direction within the configured spacing
       // or 0.35 ATR of an open one   [C2: input-driven spacing, was hard-coded 60s]
       datetime now=ServerNow();
-      if(g_lastEntryTime>0&&now-g_lastEntryTime<InpMinSecondsBetweenEntries){why="entry spacing";return false;}
+      if(g_lastEntryTime>0&&now-g_lastEntryTime<InpMinSecondsBetweenEntries){why="entry spacing";GateHist("entry spacing");return false;}
       //--- [C2 FIX] consecutive-loss pause: the input promised a halt; wire it for real
-      if(g_consecutiveLosses>=InpMaxConsecutiveLosses){why="consecutive-loss pause ("+IntegerToString(g_consecutiveLosses)+")";return false;}
+      if(g_consecutiveLosses>=InpMaxConsecutiveLosses){why="consecutive-loss pause ("+IntegerToString(g_consecutiveLosses)+")";GateHist("consecutive-loss pause ("+IntegerToString(g_consecutiveLosses)+")");return false;}
       double px=(dir>0?Ask():Bid());
       for(int i=0;i<PositionsTotal();i++)
       {
@@ -4448,7 +4462,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
          if(PositionGetString(POSITION_SYMBOL)!=eaSymbol||PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber)continue;
          if((int)PositionGetInteger(POSITION_TYPE)!=(dir>0?POSITION_TYPE_BUY:POSITION_TYPE_SELL))continue;
          double op=PositionGetDouble(POSITION_PRICE_OPEN);
-         if(MathAbs(px-op)<0.35*g_atr){why="too close to open scalp";return false;}   // [B8]
+         if(MathAbs(px-op)<0.35*g_atr){why="too close to open scalp";GateHist("too close to open scalp");return false;}   // [B8]
       }
       // [SR] entry gate: after all cost/spread/session/news gates, before dispatch
       double srAtr=g_atr;   // [B8]
@@ -4456,33 +4470,33 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       string srWhy="";
       if(!SR_EntryAllowed(dir,px,srAtr,srTp1,srWhy)){why=srWhy;return false;}
       hv=false;
-      if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}
-      if(!broker.hedging&&CountOwnPositions()>0){why="netting: one position";return false;}
-      if(CountOwnPositions()>=GetProfileMaxPositions()){why="position cap";return false;}
+      if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";GateHist("daily trade cap");return false;}
+      if(!broker.hedging&&CountOwnPositions()>0){why="netting: one position";GateHist("netting: one position");return false;}
+      if(CountOwnPositions()>=GetProfileMaxPositions()){why="position cap";GateHist("position cap");return false;}
       return true;
    }
-   RefreshWindowGating(w);if(g_ws[w].disabled){why="window expectancy disabled";return false;}
-   if(IsDisorder()){why="market disorder";return false;}
-   if(g_slipCnt>=5&&g_slipAvg>AdaptiveMaxAvgSlippagePts()){why="slippage quality gate";return false;}
-   if(g_lastSlipPts>=AdaptiveExtremeSlippagePts()&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";return false;}
+   RefreshWindowGating(w);if(g_ws[w].disabled){why="window expectancy disabled";GateHist("window expectancy disabled");return false;}
+   if(IsDisorder()){why="market disorder";GateHist("market disorder");return false;}
+   if(g_slipCnt>=5&&g_slipAvg>AdaptiveMaxAvgSlippagePts()){why="slippage quality gate";GateHist("slippage quality gate");return false;}
+   if(g_lastSlipPts>=AdaptiveExtremeSlippagePts()&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";GateHist("last fill slippage extreme");return false;}
    if(!ExternalDataReady(why))return false;
-   double spp=SpreadPercentile();if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
-   if(InpMaxATRPctOfPrice>0&&g_atr>mid*InpMaxATRPctOfPrice/100.0){why="ATR chaos";return false;}
-   double disp=CandleDisplacementATR();if(disp>InpMaxChaseCandleATR){why="anti-chase displacement";return false;}double cc=iClose(eaSymbol,PERIOD_M1,1);if(g_vwap>0&&g_atr>0&&MathAbs(cc-g_vwap)/g_atr>InpMaxEntryVWAPDeviationATR){why="anti-chase VWAP distance";return false;}
-   if(InpFilterMode==FILTER_ALL_REQUIRED&&g_score<g_scoreMax){why="filters";return false;}
+   double spp=SpreadPercentile();if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";GateHist("spread spike");return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";GateHist("spread percentile");return false;}
+   if(InpMaxATRPctOfPrice>0&&g_atr>mid*InpMaxATRPctOfPrice/100.0){why="ATR chaos";GateHist("ATR chaos");return false;}
+   double disp=CandleDisplacementATR();if(disp>InpMaxChaseCandleATR){why="anti-chase displacement";GateHist("anti-chase displacement");return false;}double cc=iClose(eaSymbol,PERIOD_M1,1);if(g_vwap>0&&g_atr>0&&MathAbs(cc-g_vwap)/g_atr>InpMaxEntryVWAPDeviationATR){why="anti-chase VWAP distance";GateHist("anti-chase VWAP distance");return false;}
+   if(InpFilterMode==FILTER_ALL_REQUIRED&&g_score<g_scoreMax){why="filters";GateHist("filters");return false;}
    g_score+=SR_DirectionalVote(dir,(dir>0?Ask():Bid()),g_atr);   // [SR] complex-mode vote: -1..+1, can never satisfy MinFilterScore alone
-   if(InpFilterMode==FILTER_SCORING&&g_score<InpMinFilterScore){why="score";return false;}
-   if(MathAbs(g_dirBias)<InpMinDirBias){why="weak directional bias";return false;}if((dir>0&&g_dirBias<0)||(dir<0&&g_dirBias>0)){why="bias conflict";return false;}
-   if(InpUseSMC&&((dir>0?g_smcScoreBull:g_smcScoreBear)<InpMinSMCConfluence)){why="SMC confluence";return false;}
-   if(!LiveMomentumConfirm(dir)){why="live price vs EMA20";return false;}
-   if((InpUseIFVG||InpUsePTB)){int adv=(dir>0?((g_ifvg&&g_ifvgDir>0)?1:0)+((g_ptb&&g_ptbDir>0)?1:0):((g_ifvg&&g_ifvgDir<0)?1:0)+((g_ptb&&g_ptbDir<0)?1:0));if(adv<InpMinAdvancedSMCConfluence&&InpMinAdvancedSMCConfluence>0){why="IFVG/PTB confluence";return false;}}
-   if(AvailableMacroCount()>0&&MacroVotes(dir)<InpMacroMinConfluence){why="macro conflict";return false;}
+   if(InpFilterMode==FILTER_SCORING&&g_score<InpMinFilterScore){why="score";GateHist("score");return false;}
+   if(MathAbs(g_dirBias)<InpMinDirBias){why="weak directional bias";GateHist("weak directional bias");return false;}if((dir>0&&g_dirBias<0)||(dir<0&&g_dirBias>0)){why="bias conflict";GateHist("bias conflict");return false;}
+   if(InpUseSMC&&((dir>0?g_smcScoreBull:g_smcScoreBear)<InpMinSMCConfluence)){why="SMC confluence";GateHist("SMC confluence");return false;}
+   if(!LiveMomentumConfirm(dir)){why="live price vs EMA20";GateHist("live price vs EMA20");return false;}
+   if((InpUseIFVG||InpUsePTB)){int adv=(dir>0?((g_ifvg&&g_ifvgDir>0)?1:0)+((g_ptb&&g_ptbDir>0)?1:0):((g_ifvg&&g_ifvgDir<0)?1:0)+((g_ptb&&g_ptbDir<0)?1:0));if(adv<InpMinAdvancedSMCConfluence&&InpMinAdvancedSMCConfluence>0){why="IFVG/PTB confluence";GateHist("IFVG/PTB confluence");return false;}}
+   if(AvailableMacroCount()>0&&MacroVotes(dir)<InpMacroMinConfluence){why="macro conflict";GateHist("macro conflict");return false;}
    int hvs=0;hv=InpAB_EnableHighVol&&IsHighVolatilityQualified(dir,hvs);
-   if(!InpAB_EnableBase&&!hv){why="A/B base engine disabled";return false;}
+   if(!InpAB_EnableBase&&!hv){why="A/B base engine disabled";GateHist("A/B base engine disabled");return false;}
    bool preferred=(w==WIN_SYDNEY_TOKYO||w==WIN_TOKYO_LONDON||w==WIN_LONDON_OPEN||w==WIN_LONDON_NY||w==WIN_NY_OPEN||w==WIN_VERIFIED_EXPANSION);
-   if(InpHighVolatilityMode==HV_FORCE_GATED && preferred && !hv){why="HV verification failed";return false;}
+   if(InpHighVolatilityMode==HV_FORCE_GATED && preferred && !hv){why="HV verification failed";GateHist("HV verification failed");return false;}
    if(!FreshSetup(dir,w,setup,why))return false;
-   if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}if(!broker.hedging&&CountOwnPositions()>0){why="netting account: one strategy position at a time";return false;}if(CountOwnPositions()>=GetProfileMaxPositions()){why="position cap";return false;}
+   if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";GateHist("daily trade cap");return false;}if(!broker.hedging&&CountOwnPositions()>0){why="netting account: one strategy position at a time";GateHist("netting account: one strategy position at a time");return false;}if(CountOwnPositions()>=GetProfileMaxPositions()){why="position cap";GateHist("position cap");return false;}
    return true;
 }
 
@@ -4693,8 +4707,8 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
 void TryArm()
 {
    if(InpCancelStalePendings)DeleteOwnPendings(true);
-   if(CountOwnPendings()>0){g_gateReason="pending orders working";return;}
-   if(!InpArmWhileInTrade&&CountOwnPositions()>0){g_gateReason="managing open position";return;}
+   if(CountOwnPendings()>0){g_gateReason="pending orders working";GateHist("pending orders working");return;}
+   if(!InpArmWhileInTrade&&CountOwnPositions()>0){g_gateReason="managing open position";GateHist("managing open position");return;}
    // EXEC_STRADDLE arms stop orders ahead of price; EXEC_DIRECTIONAL fires a market
    // order at signal time; EXEC_AUTO picks directional only in verified HV windows.
    int dir;
@@ -4702,10 +4716,10 @@ void TryArm()
    {
       // Direction comes from the two-mode signal computed on the last closed bar.
       if(g_scalpSignal>0)dir=1;else if(g_scalpSignal<0)dir=-1;
-      else{g_gateReason="no scalp signal";return;}
+      else{g_gateReason="no scalp signal";GateHist("no scalp signal");return;}
    }
    else dir=(g_dirBias>0?1:-1);
-   ENUM_WINDOW_ID w;bool hv=false;string setup,why;if(!CanEnter(dir,w,hv,setup,why)){g_gateReason=why;return;}
+   ENUM_WINDOW_ID w;bool hv=false;string setup,why;if(!CanEnter(dir,w,hv,setup,why)){g_gateReason=why;GateHist(why);return;}
    bool directional=(InpExecutionMode==EXEC_DIRECTIONAL||(InpExecutionMode==EXEC_AUTO&&w==WIN_VERIFIED_EXPANSION));
    double entry0=(dir>0?Ask():Bid());double atr=g_atr;   // [B8]
    double dist;
@@ -4718,7 +4732,7 @@ void TryArm()
       sl=PriceNorm(sl);
    }
    else{sl=ComputeSL(dir,pending);slDist=MathAbs(pending-sl);}
-   double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason=(g_lastRiskReason!=""?g_lastRiskReason:"lot/risk zero");return;}   // [SIZING] Auto mode BLOCKS on any solver gate (never manufactures volume)
+   double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason=(g_lastRiskReason!=""?g_lastRiskReason:"lot/risk zero");GateHist((g_lastRiskReason!=""?g_lastRiskReason:"lot/risk zero"));return;}   // [SIZING] Auto mode BLOCKS on any solver gate (never manufactures volume)
    // [SR] optionally widen the stop behind an S/R zone, then recompute the lot so the
    // risk % stays IDENTICAL (constraint 6). Invalid recompute -> keep the base stop.
    if(InpSRSLBehindZone)
@@ -4732,7 +4746,7 @@ void TryArm()
          if(rl>0){sl=srSl;slDist=sd2;lots=rl;g_srSlShifted=true;}
       }
    }
-   double risk=PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots);if(!RiskRoom(risk,dir,w,why)){g_gateReason=why;return;}
+   double risk=PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots);if(!RiskRoom(risk,dir,w,why)){g_gateReason=why;GateHist(why);return;}
    double t1,t2,t3;
    if(InpSimpleScalpMode)
    {
@@ -4756,11 +4770,11 @@ void TryArm()
    }
    else BuildThreeTargets(dir,pending,sl,lots,w,hv,t1,t2,t3);
    // [SR] entry gate before order dispatch for the complex branch as well
-   {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){g_gateReason=srWhy2;return;}}   // TryArm is void
+   {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){g_gateReason=srWhy2;GateHist(srWhy2);return;}}   // TryArm is void
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
    if(!InpSimpleScalpMode){
-   if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";return;}
-   if(!RRValid(dir,pending,sl,t3,InpMinRR_TP3)){g_gateReason="TP3 R:R below floor";return;}}
+   if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";GateHist("TP2 R:R below floor");return;}
+   if(!RRValid(dir,pending,sl,t3,InpMinRR_TP3)){g_gateReason="TP3 R:R below floor";GateHist("TP3 R:R below floor");return;}}
    double net1=0;
    {
       // [TP GATES] risk-relative TP1 viability (section 24): % of initial trade risk.
@@ -4768,7 +4782,7 @@ void TryArm()
       //--- already netted inside NetProfitValid; including them in the base made the
       //--- minimum scale WITH the cost and veto every min-lot trade at normal ATR.
       double slLossOnly=PriceMoveMoney(sl,lots);
-      if(!NetProfitValid(dir,pending,t1,lots,MinNetProfitForLeg(1,slLossOnly),net1)){g_gateReason="TP_NET_RISK_TOO_LOW";return;}
+      if(!NetProfitValid(dir,pending,t1,lots,MinNetProfitForLeg(1,slLossOnly),net1)){g_gateReason="TP_NET_RISK_TOO_LOW";GateHist("TP_NET_RISK_TOO_LOW");return;}
    }
    // Phase 2.4: TP1 minimum-viability (spread-aware). If the ATR-derived TP1 is closer
    // than stops-level+buffer or (spread+expectedSlip) x InpTP1SpreadMultiple, REJECT the
@@ -4782,7 +4796,7 @@ void TryArm()
       //--- brokers whose compensated TP1 is legitimately spread-adjacent.
       if(g_atr>0&&SpreadPoints()*broker.point>0&&
          MathAbs(t1-entry0)<broker.stopsLevel*broker.point+InpStopLevelBufferPoints*g_ptScale*broker.point)
-      {g_gateReason="TP1_TOO_TIGHT";return;}
+      {g_gateReason="TP1_TOO_TIGHT";GateHist("TP1_TOO_TIGHT");return;}
    }
    //--- [SIGNAL QUALITY] centralized confidence/regime decision (prompt.md sections 8-15).
    //--- Setup already exists (setup-driven); the confidence engine classifies and may veto.
@@ -4920,9 +4934,9 @@ void TryRecovery()
    double recMin1=MinNetProfitForLeg(1,recInitRisk);
    double net=0;int gguard=0;
    while(!NetProfitValid(dir,entry,t1,lots,recMin1,net)&&gguard++<10) t1=PriceNorm(t1+dir*0.10*atr);
-   if(!RRValid(dir,entry,sl,t1,InpRecoveryMinRR)){g_gateReason="recovery: R:R low";return;}
-   if(!NetProfitValid(dir,entry,t1,lots,recMin1,net)){g_gateReason="recovery: cost";return;}
-   if(!RiskRoom(PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots),dir,WIN_NONE,why)){g_gateReason="recovery: risk cap";return;}
+   if(!RRValid(dir,entry,sl,t1,InpRecoveryMinRR)){g_gateReason="recovery: R:R low";GateHist("recovery: R:R low");return;}
+   if(!NetProfitValid(dir,entry,t1,lots,recMin1,net)){g_gateReason="recovery: cost";GateHist("recovery: cost");return;}
+   if(!RiskRoom(PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots),dir,WIN_NONE,why)){g_gateReason="recovery: risk cap";GateHist("recovery: risk cap");return;}
    // Preflight the recovery request exactly like a new trade (section 23).
    {
       MqlTradeRequest prq;MqlTradeCheckResult pchk;ZeroMemory(prq);ZeroMemory(pchk);
@@ -4930,7 +4944,7 @@ void TryRecovery()
       prq.type=(dir>0?ORDER_TYPE_BUY:ORDER_TYPE_SELL);prq.price=entry;prq.sl=sl;prq.tp=t1;
       prq.deviation=AdaptiveDeviationPoints();prq.comment="preflight";
       string pr="";
-      if(!PreflightNewTrade(prq,pchk,pr)){g_gateReason="recovery: "+pr;return;}
+      if(!PreflightNewTrade(prq,pchk,pr)){g_gateReason="recovery: "+pr;GateHist("recovery: "+pr);return;}
    }
 
    string cmt=InpComment+"|RCV|"+(dir>0?"B":"S")+"|"+IntegerToString((int)g_lastLossTime);
@@ -5333,6 +5347,22 @@ void OpenLog()
 
 void PrintSummary()
 {
+   //--- [DIAG] tester rejection histogram - the answer to "why zero trades"
+   if(g_gateHistN>0)
+   {
+      Print("=== GATE REJECTION HISTOGRAM (why setups did not trade) ===");
+      // sort by count desc (simple selection)
+      for(int a=0;a<g_gateHistN;a++)
+      {
+         int best=a;
+         for(int b2=a+1;b2<g_gateHistN;b2++)if(g_gateHistCounts[b2]>g_gateHistCounts[best])best=b2;
+         string tn=g_gateHistNames[best];long tc=g_gateHistCounts[best];
+         g_gateHistNames[best]=g_gateHistNames[a];g_gateHistCounts[best]=g_gateHistCounts[a];
+         g_gateHistNames[a]=tn;g_gateHistCounts[a]=tc;
+      }
+      for(int a2=0;a2<g_gateHistN;a2++)Print(StringFormat("  %-46s %I64d",g_gateHistNames[a2],g_gateHistCounts[a2]));
+   }
+   else Print("GATE HISTOGRAM: no rejections recorded (setups never reached the gate chain - check EvaluateScalpSignal)");
    Print("=== Predict-A-Trade v1.00 Four-Session Macro/SMC Window Summary ===");
    Print("OVERALL trades=",g_perfTrades," win%=",DoubleToString(OverallWinRate(),2)," PF=",DoubleToString(OverallProfitFactor(),2)," NetR=",DoubleToString(OverallNetR(),3)," Sharpe(trade-R)=",DoubleToString(OverallSharpe(),2)," MaxDD$=",DoubleToString(g_perfMaxDDMoney,2)," MaxDD%=",DoubleToString(g_maxDDSeen,2)," Net$=",DoubleToString(g_perfNetProfit,2));
    for(int w=1;w<WIN_COUNT;w++){if(g_ws[w].trades<=0)continue;double wr=100.0*g_ws[w].wins/MathMax(1,g_ws[w].trades);double ex=WindowExpectancy((ENUM_WINDOW_ID)w);Print(WindowName((ENUM_WINDOW_ID)w)," trades=",g_ws[w].trades," net=",DoubleToString(g_ws[w].netPL,2)," win%=",DoubleToString(wr,1)," exp=",DoubleToString(ex,2)," NetR=",DoubleToString(WindowAvgR((ENUM_WINDOW_ID)w),3)," TP1/2/3=",g_ws[w].tp1Hits,"/",g_ws[w].tp2Hits,"/",g_ws[w].tp3Hits," DD=",DoubleToString(g_ws[w].maxDD,2));}
