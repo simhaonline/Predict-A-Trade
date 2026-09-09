@@ -1209,9 +1209,27 @@ int LicenseHttpPost(string endpoint,string payload,string &response)
    int code=WebRequest("POST",url,headers,"",5000,post,len,result,resultHeaders);
    if(code==-1)
    {
+      // Full diagnosis: older builds report 4014 for a non-whitelisted URL, newer
+      // builds use 5200-5203. Print the exact code so the user's log is actionable.
       int err=GetLastError();
-      if(err==4014)
-         Print("LICENSE: WebRequest blocked. FIX: Tools > Options > Expert Advisors > Allow WebRequest for listed URL -> add ",InpLicenseServerURL);
+      switch(err)
+      {
+         case 4014:
+         case 5200:
+            Print("LICENSE: WebRequest blocked (err ",err,"). FIX: Tools > Options > Expert Advisors > tick 'Allow WebRequest for listed URL' and add exactly  ",InpLicenseServerURL,"   (no trailing slash), click OK, re-attach the EA.");
+            break;
+         case 5201:
+            Print("LICENSE: WebRequest connect failed (err 5201) to ",url,". Check this machine's network / proxy / firewall and test https://license.predictatrade.com/healthz in its browser.");
+            break;
+         case 5202:
+            Print("LICENSE: WebRequest timeout (err 5202): ",url," did not answer in 5 s. If this network prefers IPv6 and has broken IPv6, disable IPv6 or test https://license.predictatrade.com/healthz in this machine's browser.");
+            break;
+         case 5203:
+            Print("LICENSE: WebRequest HTTP error (err 5203) from ",url,". If this persists the server may be down - check https://license.predictatrade.com/healthz.");
+            break;
+         default:
+            Print("LICENSE: WebRequest failed (err ",err,") calling ",url,". Test https://license.predictatrade.com/healthz in this machine's browser and re-attach.");
+      }
       return 0;
    }
    response=CharArrayToString(result,0,WHOLE_ARRAY,CP_UTF8);
