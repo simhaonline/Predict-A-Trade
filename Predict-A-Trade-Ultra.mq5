@@ -156,7 +156,7 @@ input double InpWeeklyLossLimit           = 6.0;
 input double InpMonthlyLossLimit          = 10.0;
 input double InpRiskPercent               = 0.35;      // LEGACY/MANUAL: base trade risk when InpAutoCapitalProfile=false
 input double InpRiskStepDownOnDD          = 0.15;
-input int    InpMaxConsecutiveLosses      = 10;      // pause only after 3 straight; risk decays 30% per loss before that
+input int    InpMaxConsecutiveLosses      = 10;       // pause only after 3 straight; risk decays 30% per loss before that
 input int    InpMaxTradesPerDay           = 100;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
 input double InpMinLotMaxRiskPct          = 1.5;       // LEGACY/MANUAL: min-lot ceiling when AutoCapitalProfile=false (else profile ceiling)
@@ -1489,7 +1489,7 @@ void CheckLicense()
             Print("LICENSE: grace period expired - trading blocked");
          }
       }
-      else g_licenseLastReason="server_unreachable";
+      else if(g_licenseLastReason!="pending_activation")g_licenseLastReason="server_unreachable";   // keep PENDING state sticky
       return;
    }
 
@@ -1521,6 +1521,15 @@ void CheckLicense()
    string v=LicenseJsonField(resp,"valid");
    if(v!="true")
    {
+      // PENDING activation + "not_activated": the init activate never landed (transport
+      // blip) - the heartbeat cannot validate a seat that doesn't exist. Recover by
+      // running the REAL activation now (same retry/failover inside LicenseHttpPost).
+      if(g_licenseLastReason=="pending_activation" && LicenseJsonField(resp,"reason")=="not_activated")
+      {
+         Print("LICENSE: PENDING state - heartbeat says seat missing; running full activation");
+         if(LicenseActivate())return;   // activated - trading unblocked on next gate
+         return;                         // still failing transport; next retry continues
+      }
       bool wasActive=g_licenseActive;
       g_licenseActive=false;
       g_licenseLastReason=LicenseJsonField(resp,"reason");
@@ -1543,6 +1552,11 @@ void CheckLicense()
    {
       g_settingsVersion=serverVersion;
       Print("LICENSE: settings updated to version ",serverVersion);
+   }
+   if(g_licenseLastReason=="pending_activation")
+   {
+      g_licenseLastReason="";
+      Print("LICENSE: PENDING activation RESOLVED - seat validated, trading unblocked");   // self-heal proof
    }
 }
 
@@ -6017,8 +6031,20 @@ int OnInit()
       LicenseSelfTest();
       if(!LicenseActivate())   // immediate first validation
       {
-         if(TimeCurrent()>=g_gracePeriodDeadline || g_gracePeriodDeadline==0)
-         {Print("INIT FAILED: license could not be validated on first run (no grace period is active on first run).");return INIT_FAILED;}
+         // TRANSPORT failure (1009/1001/1003 middlebox/edge class) must NOT kill the EA:
+         // the terminal would deinit and the user would have to manually re-attach until
+         // a Cloudflare edge blip happens to pass. Instead: init SUCCEEDS in a PENDING
+         // state - trading stays blocked (LicenseCheckGate requires g_licenseActive),
+         // and the OnTimer license retry loop activates the seat as soon as the edge
+         // answers. Only a hard REJECTION (parsed valid:false, e.g. bad/revoked key)
+         // still fails init - that cannot heal by retrying.
+         bool hardRejection=(g_licenseLastReason!="" && g_licenseLastReason!="server_unreachable"
+                             && StringFind(g_licenseLastReason,"transport")!=0
+                             && StringFind(g_licenseLastReason,"http")!=0);
+         if(hardRejection)
+         {Print("INIT FAILED: license rejected (",g_licenseLastReason,") - check the license key.");return INIT_FAILED;}
+         Print("LICENSE: activate transport-blip at init (edge/middlebox) - EA starts in PENDING state; auto-activating on the 30s license retry. Trading blocked until activation lands.");
+         g_licenseLastReason="pending_activation";
       }
    }
    // ---- Mobile command bridge (Phase 3) ------------------------------------
@@ -6133,9 +6159,11 @@ void OnTimer()
    if(InpLicenseKey!="" && TimeCurrent()>=g_nextLicenseCheck)   // [LICENSE] WebRequest ONLY here, never in hot paths
    {
       CheckLicense();
-      // healthy: poll every 10 min. Unhealthy (no seat validated / grace running):
-      // retry every 2 min so recovery is fast once the network path heals.
-      g_nextLicenseCheck=TimeCurrent()+((g_licenseActive)?600:120);
+      // healthy: poll every 10 min. PENDING activation (transport blip at init): retry
+      // every 30s so the seat lands as soon as the edge answers. Unhealthy otherwise:
+      // 2 min. This is what self-heals a 1009/1003 Cloudflare blip without user action.
+      long interval=(g_licenseActive?600:(g_licenseLastReason=="pending_activation"?30:120));
+      g_nextLicenseCheck=TimeCurrent()+interval;
    }
 }
 
