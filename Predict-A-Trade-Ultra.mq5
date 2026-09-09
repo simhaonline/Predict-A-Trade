@@ -1091,9 +1091,10 @@ string LicenseSHA256(string text)
       int len=StringToCharArray(text,msg,0,WHOLE_ARRAY,CP_UTF8);
       if(len>0)len--;   // StringToCharArray appends the terminator
       ulong bitLen=(ulong)len*8;
-      //--- padding
+      //--- padding: msg + 0x80 + zeros + 8-byte length must total a multiple of 64,
+      //--- so the zeros run must end at 56 (mod 64) to leave room for the length.
       int padded=len+1;
-      while(padded%64!=57)padded++;
+      while(padded%64!=56)padded++;
       uchar buf[];
       ArrayResize(buf,padded+8);
       for(int i=0;i<len;i++)buf[i]=msg[i];
