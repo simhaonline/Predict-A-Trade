@@ -1,0 +1,110 @@
+# Production-Readiness Audit — `Predict-A-Trade-Ultra.mq5` (v2.00)
+
+**Target:** XAUUSD M1 ultra-scalper, ~2,600 lines, native `OrderSend` (no CTrade), FMP macro adapter, MQL5 calendar news gate, TP1/TP2/TP3 ladder, SR zone module, license client + mobile bridge.
+
+**Verdict: NOT production ready. Do not fund it.** Under the *shipped defaults* the EA is far more likely to never place a trade than to place a good one — and if you loosen the gates enough to make it trade, the default configuration is negative expectancy. Fix the five **Blockers** below (A1–A5) before any demo/walk-forward run is worth the time, because right now a backtest would measure "no trades," not the strategy.
+
+**Method + honest limits.** No MQL5 toolchain exists in this environment (`wine`, `metaeditor64.exe`, `mql5` all absent), so **nothing here is compiler-proven**. Findings come from reading the source you pasted, plus two things I could actually run:
+- a declaration-order checker (`verify/declcheck.py`) validated on a purpose-built fixture — see A5 for what it can and cannot prove;
+- an arithmetic replay of the entry gates against real broker geometry (`verify/gate_sim.py`), which produced the cost/net-R:R tables in A1 and the payoff table in A2.
+Line numbers are quoted from my transcription of your paste (`verify/reconstructed.mq5`), **not** from your file — use the function names to locate things. The license endpoints were live at audit time: `license.predictatrade.com/healthz` and `license2.predictatrade.com/healthz` both returned **200**.
+
+---
+
+## A. Blockers — must fix before any live/demo use
+
+### A1. The default gate set makes normal setups mathematically un-tradeable
+`InpUseConfidenceEngine=true` + `InpMinNetRR_EMAPullback=0.40` (and `LondonBreakout=0.60`, `NYMomentum=0.60`, `ComplexMode=0.40`) filter on **net** R:R, where net TP1 profit is measured after spread + slippage + commission. But the shipped ladder fixes TP1 at `0.40 × ATR` (cap) against a `1.09 × ATR` structural stop. Cost, not the market, decides the ratio, so it is **size-independent** — a $50k account fails the same gate as a $100 account:
+
+| Feed (XAUUSD M1, ATR = 250 pt) | cost % of TP1 | net R:R | clears 0.40 gate? |
+|---|---|---|---|
+| ECN raw, 25 pt spread, 3 pt slip, $7/lot RT | 35% | **0.211** | **no** |
+| ECN raw, 20 pt, 1 pt slip, $7 RT | 28% | **0.240** | **no** |
+| Retail standard, 35 pt, 4 pt slip, $0 | 39% | **0.196** | **no** |
+| Retail standard, 45 pt | 50% | **0.155** | **no** |
+| Very tight ECN, 12 pt, $0 comm | 13% | 0.305 | no (passes the 0.25–0.30 setups only) |
+| Same feeds, quiet hour (ATR 110 pt) | 64–80% | 0.06–0.11 | **no**, and `InpMaxCostToTP1Pct=40` + `TP1_TOO_TIGHT` also fire |
+
+So: with a real broker's costs, `0.40` net R:R at a `0.40 ATR` TP1 is not reachable — it isn't conservatism, it's a contradiction between the ladder constants and the gate. Note that `InpMinTP1NetRiskPct=10` alone is *not* the problem (net TP1 ≈ 25c vs the 10%-of-risk requirement ≈ 23c — it squeaks through on ECN and fails outright on low ATR); the blocking numbers are the `InpMinNetRR_*` table and `InpMaxCostToTP1Pct`.
+
+**Fix (one of):** (a) size the gate off the *whole-ladder* payoff you actually expect, not TP1 in isolation; (b) raise `InpTP1_ATR_Cap` to ~0.55–0.65 and drop `InpMinNetRR_EMAPullback` to ~0.25, then re-tune; or (c) stop treating net R:R as a hard entry gate on a scalper — treat it as a reporting metric and let the cost model (`ExpectedAllInCost`) do the gating. Whatever you pick, log the achieved net R:R distribution over a month of ticks and set the gate from data, not from intent.
+
+### A2. In simple (default) mode, TP1 can never be banked
+`AddPositionState` sets `s.volTP1=lots; s.volTP2=0; s.volTP3=0;` and the TP1 exit uses
+`double cv = MathMin(g_ps[idx].volTP1, vol - broker.volumeMin);`
+At the minimum tradable volume `vol - volumeMin = 0`, so `cv = 0` → nothing is closed, the leg is *marked* `tp1Done`, price runs to TP3 or the trail/BE logic ends the trade. Consequence: wins that you believe are "+0.4 ATR at 30–50% of volume" are actually **+0.15R-ish** micro-exits (or a full-size trip to TP3). Breakeven win rate on that payoff is **~87%**:
+
+| realized avg win | breakeven WR |
+|---|---|
+| +0.15R (BE/trail/time exit — what simple mode produces) | **87.0%** |
+| +0.40R (TP1 as designed, if it fired) | 71.4% |
+| +1.15R (TP3 only) | 46.5% |
+
+**Fix:** `volTP1 = MathMax(volumeMin, NormalizeDouble(lots*InpTP1Pct, volume step))` **and** reject the setup outright when `lots < 2*volumeMin` (a one-lot position cannot be laddered, and pretending otherwise is what produced this bug). Better: make the ladder conditional on `lots/volumeMin >= 3`.
+
+### A3. Forward declaration type mismatch — likely a hard compile error
+`int WindowRiskMultiplier(ENUM_WINDOW_ID w);` (forward block, transcribed L104) vs `double WindowRiskMultiplier(ENUM_WINDOW_ID w)` (definition, transcribed L2910), and the return value is fed into `cap *= WindowRiskMultiplier(window);`. This is exactly the class of bug that "it looked fine in the editor" misses.
+**Fix:** make the prototype `double`. Then re-read every other prototype in that forward-declaration block against its definition — that block is new in v2.00 and this is the one mismatch I could find, but it is the pattern to sweep.
+
+### A4. `WindowRiskMultiplier`'s input is dead — and it was doing real work
+`InpWeakWindowRiskMultiplier=0.50` and its sibling window-risk multipliers are read only through `GetProfileWindowRiskPct()` (MICRO/STANDARD/AGGRESSIVE constants 1.00/0.75/0.50), so the *window* component of the risk stack is effectively ignored. Your own history backs this up: "changing `InpRiskPercent` from 1.0→0.5 had no effect" is the same root cause — the risk % comes from the auto-capital profile, not from the input you edited. Two inputs that look like risk controls are not controls.
+**Fix:** either multiply `GetProfileWindowRiskPct()` by `WindowRiskMultiplier(w)` (its clear intent) or delete the inputs. Do not ship risk inputs that silently no-op — the next person to tune this file will be fooled exactly as you were.
+
+### A5. Globals declared after the modules that use them — needs a 10-second check in MetaEditor
+The paste lays the file out as: header/inputs → **SR zone module** → license/mobile bridge → time/session/state helpers → **structs + CAPITAL ENGINE globals block** → FMP/SMC/confidence/signal → filters → risk → execution. The SR and session helpers reference `g_atr`, `g_spreadRejects`, `g_ema9/g_ema200`, `g_macd*`, `g_bb*`, `g_srZoneATR`, `g_volumeState`, `g_volumePercentile`, `g_volRatio`, `g_gateReason` — all declared hundreds of lines *below* their first use, inside the CAPITAL ENGINE block. The file's own banner comment says *"forward declarations (definition order independence)"* and lists **only functions**, which suggests the author applied the rule to functions and not to data.
+**What I could and could not prove:** my checker on a minimal fixture reproduces the pattern (2 forward uses, 0 false positives), and on a full reconstruction assembled in your block order it reports **33 forward uses** (widest gaps ~+1,000 lines, e.g. `g_spreadRejects`, `g_atr`) with 280/280 `g_*` names resolved. That is corroboration from my reconstruction, not from your file. **Action: compile it. If MetaEditor accepts out-of-order global declarations, this item is void — if it doesn't, it is the first error you hit.** Fix in either case: hoist every `g_*` declaration above the first module that uses it (a `Globals` section right after the enums).
+
+---
+
+## B. High severity — will bite in live operation
+
+- **B1. Window risk/signal budget is never released.** `g_windowRiskUsed[w] += risk` on `DEAL_ENTRY_IN` only; the sole reset is the once-per-day `ResetWindowDay()` (which also clears `g_windowSignals`). A scalp that closes in 60 s keeps reserving its risk for the rest of the session. Measured burn: **~2–3 trades per session** at $1k–$10k (0.31% risk/trade vs a 1.0% window budget), i.e. an "ultra scalper" that self-freezes before London ends. **Fix:** decrement the reserved risk on `DEAL_ENTRY_OUT` (prorate by closed volume for partials) and release the signal count only on a *completed* entry.
+- **B2. FMP availability flag latches.** `g_usdGot[i]=true` on each successful batch; `g_usdAvailable=(okCount>=FMPUSD_COUNT-2)` recomputed from that array; the array is zeroed **only in `OnInit`**. After one good poll, a dead/quota-exhausted feed still reports "available", so the *stale* macro bias keeps multiplying confidence silently. **Fix:** zero `g_usdGot[]` at the top of every refresh cycle and add a `g_fmpLastOK` staleness cut to 0 bias (the field exists; nothing consumes it — `grep g_fmpLastOK` shows only assignments).
+- **B3. No filling-mode fallback, and retries reuse a stale price.** `SendOrder` sets `rq.type_filling=BestFillingMode()` once, loops `k<=InpOrderRetry` with `Sleep(40)`, and returns `false` immediately on `INVALID_PRICE`/`INVALID_STOPS`. Consequences: (i) if the broker rejects the chosen mode for *partial closes* (very common: no `IOC` on `TRADE_ACTION_DEAL` against a position), TP1/TP2/TP3 partials silently never execute; (ii) each retry re-sends the **same** `rq.price` — on gold during news the 40 ms × 3 retries are precisely when price has moved. **Fix:** on retry, re-read Ask/Bid and re-normalize before resending; on `RETCODE_ORDER_FILL_MODE_NOT_SUPPORTED` (and friends), walk the filling-mode list explicitly; treat a failed *partial* as a hard error (Alert + `g_gateReason` + no-TP1 state) rather than a silent miss.
+- **B4. Session logic is inconsistent about time zones.** Mode C (London-open scalp, `um>=7*60 && um<=8*60+15`) and Mode D (NY-open, `13*60+30..15*60+30`) hard-code **UTC**, while the rest of the file has a DST-aware `LocalMinutes()`/`Inp*LocalOpenMin` engine. Result: in summer those two setups fire 1 hour off for a Dubai/London/EU user, and never fire on time for a US user. **Fix:** route all four scalp modes through the same window resolver as `CurrentWindow()`.
+- **B5. Mode D reads the wrong bars.** Inside the NY-open block: `CopyRates(sym,PERIOD_M1,2,15,r2)` **without** `ArraySetAsSeries(r2,false)` (Mode C's `CopyRates(...,1,asiaBars,r)` is the same shape). With the default series ordering, `r2[0]` is the *oldest* element, so the 15-bar high/low is computed from the **oldest** bars in the copy. If `asiaBars>15` in Mode C, its high/low may also be wrong. **Fix:** set series orientation explicitly at every `Copy*` call site and assert `ArrayMaximum/Minimum` indices are inside `rates_total`.
+- **B6. SR zone scoring is inert.** `SR_MergeZones(atr)` runs **before** `SR_CountTouches(atr)` and `SR_ScoreZones(atr)` (transcribed L610–613), and candidates enter merge with `z.rawStrength=0`. So `wA=MathMax(1e-9,rawStrength)` clamps *every* weight to `1e-9`, the "weighted" merge degenerates to a plain midpoint, and the summed strength is meaningless. Separately, `SR_CountTouches` requires **full bar containment** inside the zone band, which almost never happens on M1 gold — so `touches≈0`, `strength≈0`, and `SR_EntryAllowed` gates are effectively "price is not sitting inside a dead zone." You have O(n²) work (3 passes over 512 candidates) doing very little.
+  **Fix:** move merge after scoring; compute `rawStrength` from bar-count/rejection data *before* merge; define a touch as "price entered the band" (`low<=top && high>=bottom`), not containment; then re-check `InpSRMinZoneStrength=0.35`.
+- **B7. Disorder can become a permanent lockout.** `IsDisorder()` returns early while `g_disorderUntil>now`; otherwise, if spread is elevated past the percentile gate it sets `g_disorderUntil = now + InpDisorderCooldownMinutes*60` and returns `true`. On a feed where the 20th-percentile gate and the *re-tightened* `AdaptiveSpreadCap` both stay true, every tick re-extends the freeze → the EA stops trading for the rest of the day with reason `market disorder`. **Fix:** only extend on a *new* excursion edge; cap total freeze minutes/day; count and log re-extensions.
+- **B8. Geometry self-widens on expensive feeds.** `double atr=MathMax(g_atr,MinTradeDistance())` (used for SL projection, the 0.35 ATR de-dup distance, and more) where `MinTradeDistance()=(stopsLevel+buffer)*point+2*point`. With `InpStopLevelBufferPoints=2` on a 3-digit broker this inflates *every* distance, then `SpreadCompensationFactor()` multiplies it again. A floor meant to prevent `INVALID_STOPS` quietly changes the strategy geometry, and it is fed into the "ATR chop" gates too. **Fix:** separate *broking* minimums from *strategy* distances — validate against `MinTradeDistance()` but size off `g_atr` alone.
+- **B9. `g_ptScale` covers two of many point-scaled inputs.** `(broker.digits==3?10.0:1.0)` is applied to `InpMaxSpreadPoints`, `InpMinATRPoints`, `InpMaxATRPoints`, `InpDistance`, and the spread caps, but (by name inspection) not to the other `...*Points` inputs. On a 3/5-digit feed, unscaled inputs are 10× too small/large. **Fix:** scale once — normalize *all* point-denominated inputs at `OnInit`, or store them internally in price units.
+
+## C. Medium — correctness, evidence quality, operability
+
+- **C1. `MakeSetupId` cannot dedupe.** `return IntegerToString(w)+"-"+(dir>0?"B":"S")+"-"+IntegerToString((int)iTime(sym,PERIOD_M1,1));` — a fresh ID every bar, while `FreshSetup` blocks only *exact* repeats. So `InpOncePerValidatedEvent=true` is decorative (it is on the default path too). **Fix:** key on the *event* that triggered the signal — BOS/CHOCH swing timestamp + FVG anchor bar + zone ID — not on the current bar.
+- **C2. Three rate-limiters do nothing in default mode.** `CanEnter` returns `true` inside the `InpSimpleScalpMode` branch before `FreshSetup`, the `InpMaxSignalsPerWindow` window cap, and `InpMinSecondsBetweenEntries` (it uses a hard-coded `now-g_lastEntryTime<60` instead). `InpMaxConsecutiveLosses` has **zero consumers** in the file despite its comment promising a pause (recovery is separately disabled in simple mode, so `g_consecutiveLosses` only ever *inflates* risk via `InpRecoveryRiskBoost=1.50` while the loss cap that was supposed to bound it is never read — that asymmetry is the scary one). **Fix:** move the shared per-bar/spread/chop/signal-rate gates **above** the simple-mode branch, and wire `InpMaxConsecutiveLosses` to an actual halt (or delete the input).
+- **C3. Sizing can override its own ceiling.** `CalculateLotNative` rounds down, then falls back to `volumeMin` if the result is below it — a 2.28% loss on $100 vs the 0.50% ceiling, capped only by the aggregate check (`MICRO` max aggregate = 0.75%, so one 0.01 trade at $100 is already near that). **Fix:** when the min-lot fallback is needed, *reduce* to `volumeMin` **and** record `g_lastRiskReason="MINLOT_RISK_EXCEEDS_PROFILE"` and refuse the trade unless `InpAllowMinLotOversize` is explicitly set.
+- **C4. `InpMaxATRPoints=600` blocks the moves you want.** The comment on the neighbouring input says *"gold M1 ATR regularly exceeds 350 pt"*; a 600-pt (6.00 USD) ceiling on M1 gold excludes news/expansion bars — precisely the ultra-scalp population. Combined with `ReasonFilter` + the hard-coded liquidity check, expect the EA to trade only in the tamest minutes. **Fix:** derive the cap from the ATR percentile (e.g. block only `>P95`) instead of an absolute.
+- **C5. The log does not record what you need to debug A1/A2.** `OpenLog`'s header and the `ARM` row are the same width in my transcription (14 fields each), so I am **not** claiming a mismatch — but count them in your file, because a one-field drift there silently corrupts every downstream read. More importantly, nothing in the row tells you *why a trade was shaped that way*: there is no net R:R, no cost breakdown (spread vs slippage vs commission), no SR zone id, no `volTP1..3`, no `g_gateReason` snapshot at arm time. Without those, your 100-trade demo cannot distinguish "strategy has no edge" from "gates never opened" (A1) or "TP1 silently didn't fire" (A2). **Fix:** one shared `LOG_HEADER` constant emitted next to a `#define LOG_FIELDS`, plus the missing columns above.
+- **C6. State file is truncated in place.** `SaveState` uses `FILE_BIN|FILE_WRITE|FILE_COMMON` every 30 s; a terminal crash mid-write leaves a short/garbage file. `LoadState` then prints *"State file format differs — starting from a clean slate"* and **keeps whatever `RecountConsecutiveLosses` found** — so recovery state can silently reset or double-count after a VPS reboot. **Fix:** write `name.tmp`, `FileFlush`+close, then rename over; verify `g_consecutiveLosses` after reload against open-position P/L.
+- **C7. Dashboard cost is not tester-gated.** The SR rebuild *does* skip work in the tester (`if(MQL_TESTER && !MQL_VISUAL_MODE) return;`) but `DashUpdate()` is called from `OnTimer(1s)` and from the end of `ManageAllPositions()` with no such guard, and recreates all objects every refresh. On a 12-month M1 gold tick run that is a dominant runtime cost and thousands of `ObjectCreate` log lines. **Fix:** early-return when `MQL_TESTER && !MQL_VISUAL_MODE`, and only `ObjectSet*` changed fields.
+- **C8. Session-filter semantics are easy to mis-set.** `if(InpUseSessionFilter&&!tr) return false; if(w==WIN_NONE) return false;` — the `WIN_NONE` rejection is *not* under the filter flag, so `InpUseSessionFilter=false` still requires the window resolver to classify a tradeable window. Confirm what `CurrentWindow` returns when every `InpTrade*` is unchecked (if `WIN_NONE`, "disable sessions" means "never trade"). **Fix:** when the filter is off, treat `WIN_NONE` as a valid neutral window for gating purposes.
+- **C9. `ZeroMemory` on structs containing `string` members** (`SignalDecision`, `GoldOptionsSnapshot`, and `SRZone z; ZeroMemory(z);`). I could not determine whether MetaEditor flags this as an error or only a warning; string members need explicit `=""` assignment. **Fix:** replace with an explicit `ResetX()` or `= {0}` semantics.
+
+## D. Low / hygiene
+- `BestFillingMode()` is re-evaluated per request; cache per symbol at `OnInit` (and expose as an input for override).
+- `NetProfitValid` loop `while(!NetProfitValid(...)&&guard++<10) tp1+=dir*0.10*atr;` — a 10-step × 0.10 ATR walk can silently push "TP1" to 1.0 ATR (past TP2) and *widen* the ladder the gates were supposed to police; log when `guard>0`.
+- `SaveState` writes a dummy `FileWriteInteger(f,0,INT_VALUE)` after `setupId` — harmless today, a latent desync if the reader ever expects the real value; add a `STATE_TAG` bump comment.
+- Log filename `PAT101_<sym>_<date>.csv` has no magic/account component → two charts on one terminal share a file (and race on `FILE_SHARE_READ`).
+- `RecountConsecutiveLosses` uses `HistorySelect` over the full day — on a heavy day this is the most expensive call in `OnInit`; bound the window.
+
+## E. Security / licensing — read this before you distribute
+- The FMP key is obfuscated by a **+3 ASCII shift**. That is not protection: anyone with the `.ex5` (or anyone decompiling, or you, from this file) recovers it in one line, and every victim's EA then bills **your** FMP plan. Treat any key shipped in an EA as public. Move it server-side, or issue per-user keys you can revoke.
+- License enforcement is entirely client-side (`LicenseCheckGate()` in `OnInit`/`OnTimer`) and bypassable by editing the EA; the fail-safe logic is what actually matters operationally. With both endpoints live (200 on `/healthz`), the practical risks are (i) `OnInit` hard-reject semantics when a legitimate user's validation request is slow/blocked, and (ii) the 720-min grace clock: confirm it starts on *first failure*, not on first success, or a user can run 12 h offline after one good ping. Consider "trade while unverified but tag the order comment + refuse on withdrawals," plus server-side entitlement at generation time.
+
+## F. What "production ready" requires here (your own bar, currently unmet)
+The file's pre-deploy note demands walk-forward + 2–3 months of demo on the *same broker and account type* with real spread/slippage/commission + 100 trades. You cannot start that clock until A1–A4 are fixed, because today: A1/A3/A5 stop the trades or the compile, and A2 makes any results you do get a different strategy than the one described.
+
+**Suggested order of work**
+1. Compile in MetaEditor → resolve A3/A5 (and C9) first; paste the first error line here and I'll fix it precisely.
+2. Fix A1 + A2 + B1 together, because they share the cost/ladder/budget model: introduce one `TradeEconomics` computation used by sizing, gates, *and* the log row.
+3. Fix B2, B3, B5, B6 (small, local, high-value).
+4. Add C5 logging, then run 2–4 weeks of **ticks/real-spread** testing and re-derive A1's gate from measured cost and payoff distributions.
+5. Walk-forward the tuned config; then 2–3 months demo; then ≥100 trades with a per-`g_gateReason` rejection histogram before any live funding.
+
+## G. Corrections to my earlier read (stated so you can trust the rest)
+- **Retracted:** "CSV header 38 cols vs ARM row 39 fields" — in the transcription both are 14 fields; there is no evidence of a mismatch (see C5 for what is actually missing).
+- **Retracted:** "`InpUseSessionFilter=false` leaves the EA permanently blocked at defaults" — the input is `= true`, and the `WIN_NONE` gate is a separate (C8) concern.
+- **Retracted:** "`ClosePartialSafe`/`SendOrder` propagate `BestFillingMode()` *with no fallback*" as only an ops note — re-reading `SendOrder` (A/B3) showed no fallback **and** a stale-price retry; upgraded to High.
+- **Retracted:** "`MakeSetupId` embeds `g_bosUp/g_chochUp/...`" — in the paste it embeds the M1 bar time instead; the "dedupe is inert" conclusion stands, the mechanism was wrong.
+- **Softened:** "`InpMinTP1NetRiskPct=10` can *never* pass" — on typical feeds it passes narrowly; the binding constraints are `InpMinNetRR_*` and `InpMaxCostToTP1Pct`. That is the correct diagnosis, and A1 is still a blocker.
