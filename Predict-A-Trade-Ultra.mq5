@@ -156,8 +156,8 @@ input double InpWeeklyLossLimit           = 6.0;
 input double InpMonthlyLossLimit          = 10.0;
 input double InpRiskPercent               = 0.35;      // LEGACY/MANUAL: base trade risk when InpAutoCapitalProfile=false
 input double InpRiskStepDownOnDD          = 0.15;
-input int    InpMaxConsecutiveLosses      = 3;      // pause only after 3 straight; risk decays 30% per loss before that
-input int    InpMaxTradesPerDay           = 25;
+input int    InpMaxConsecutiveLosses      = 10;      // pause only after 3 straight; risk decays 30% per loss before that
+input int    InpMaxTradesPerDay           = 100;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
 input double InpMinLotMaxRiskPct          = 1.5;       // LEGACY/MANUAL: min-lot ceiling when AutoCapitalProfile=false (else profile ceiling)
 input double InpMaxAggregateOpenRiskPct   = 2.5;
@@ -473,7 +473,7 @@ input int    InpMagicNumber               = 20260911;
 input string InpComment                   = "Predict-A-Trade v4";
 
 input group "=== LICENSE / MOBILE CONTROL ==="
-input string InpLicenseKey            = "";    // License key; blank = local/unrestricted mode
+input string InpLicenseKey            = "PAT-EF52-457F-CD40-BF9F";    // License key; blank = local/unrestricted mode
 input string InpLicenseServerURL      = "https://license.predictatrade.com"; // License server base URL (HTTPS only)
 input string InpLicenseServerURL2     = "https://license2.predictatrade.com"; // Backup license endpoint (auto-failover; blank = primary only)
 input int    InpLicenseGraceMinutes   = 720;   // Grace period when the server is unreachable (minutes)
@@ -5995,6 +5995,7 @@ int OnInit()
    UpdateStructureState();UpdateVolumeEngine();UpdateDirectionRegime();UpdateEnvironmentRegime();
    Print("DASHBOARD: panel at x=",g_x," y=",g_y," width=",g_panelW," height=",g_panelH," (drag header to move; click header to collapse/expand)");
    Print("SIGNAL QUALITY: structure=",StructureStateName(g_structureState)," dirRegime=",DirectionRegimeName(g_dirRegime)," env=",EnvironmentRegimeName(g_envRegime)," vol=",VolumeStateName(g_volumeState)," (p",DoubleToString(g_volumePercentile,0),") threshold=",DoubleToString(EffectiveConfidenceThreshold(),1));
+   Print("TRADE GATES ACTIVE: spread hard cap ",InpMaxSpreadPoints,"pt (Xelans ECN runs 35-45pt - widen InpMaxSpreadPoints if your broker's normal spread exceeds it) | confidence ",DoubleToString(InpMinConfidenceScore,0),"+ gap ",DoubleToString(InpMinDirectionalConfidenceGap,0)," | netRR per setup | consecutive-loss decay x0.70/loss (floor ",DoubleToString(InpRiskFloorPct,2),"%)");
    // [CAPITAL ENGINE] classify once at init + log the profile environment
    g_capitalProfile=GetCapitalProfile();
    Print("CAPITAL ENGINE: profile=",CapitalProfileName(g_capitalProfile)," equity=",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)," ",broker.currency," equityUSD=",DoubleToString(GetEquityUSD(),2)," capitalBase=",DoubleToString(GetConservativeCapitalBase(),2)," baseRisk=",DoubleToString(GetProfileBaseRiskPct(),3),"% aggregate=",DoubleToString(GetProfileAggregateRiskPct(),2),"% maxPositions=",GetProfileMaxPositions(),(g_usdConvertNote!=""?" ["+g_usdConvertNote+"]":""));
