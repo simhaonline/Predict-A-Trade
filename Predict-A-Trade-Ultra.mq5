@@ -5795,7 +5795,7 @@ void DashUpdate(bool force=false)
    //================ RIGHT COLUMN (flow) =================
    int yR=g_bodyTop;
    DashSection("RB",1,yR,"broker / account");
-   DashRow("R_ACC",1,yR,AccTypeName(broker.tradeMode)+" "+MarginModeName(broker.marginMode)+(broker.hedging?" (hedge)":" (net)"),C_GOLD_TXT);
+   DashRow("R_ACC",1,yR,AccTypeName(broker.tradeMode)+"  Hedging: "+(broker.hedging?"SUPPORTED":"NOT SUPPORTED (netting - one position at a time)"),C_GOLD_TXT);
    DashRow("R_BRK",1,yR,broker.company,C_TXT2);   // clipped to column
    DashRow("R_LEV",1,yR,"Lev 1:"+IntegerToString(broker.leverage)+"  "+TradeModeName((int)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_MODE)),C_TXT);
    DashRow("R_SWAP",1,yR,"Swap "+DoubleToString(broker.swapLong,1)+"/"+DoubleToString(broker.swapShort,1)+"  Comm $"+DoubleToString(commRT,2),C_TXT2);
