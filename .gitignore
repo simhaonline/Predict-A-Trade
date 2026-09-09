@@ -2,4 +2,6 @@
 .env
 *.env
 !*.env.example
+error.logScreenshot_1.png
+prompt.md
 error.log
