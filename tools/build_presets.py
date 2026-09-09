@@ -123,10 +123,14 @@ def parse_profile(prompt):
 
 
 def parse_sr_defaults(prompt):
-    """Phase 3.5 SR defaults: `InpX = value` pairs between PHASE 3 and PHASE 4."""
-    lines = prompt.replace("\r\n", "\n").split("\n")
-    p3 = next(i for i, l in enumerate(lines) if "PHASE 3" in l)
-    p4 = next(i for i, l in enumerate(lines) if "PHASE 4" in l and i > p3)
+    """Phase 3.5 SR defaults from a live prompt.md; empty when it has rotated away
+    (then every SR input keeps its EA source default, which is the shipped profile)."""
+    try:
+        lines = prompt.replace("\r\n", "\n").split("\n")
+        p3 = next(i for i, l in enumerate(lines) if "PHASE 3" in l)
+        p4 = next(i for i, l in enumerate(lines) if "PHASE 4" in l and i > p3)
+    except StopIteration:
+        return {}
     section = "\n".join(lines[p3:p4])
     vals = {}
     # single pair per line

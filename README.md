@@ -12,7 +12,7 @@ vendors — the EA runs identically without it.
 ```
 Predict-A-Trade-Ultra.mq5      the EA (single file, ~4,400 lines)
 tools/build_presets.py         self-contained .set generator (Python stdlib only)
-presets/*.set                  5 ready-to-load presets (304 inputs each)
+presets/*.set                  4 ready-to-load presets (304 inputs each)
 license-server/                optional Go license backend (Gin + Redis + PostgreSQL)
 docs/                          audit, methodology, module & deployment docs
 ```
@@ -55,7 +55,9 @@ An ultra-scalper that trades XAUUSD M1 through a four-session opportunity engine
    Expected: 0 errors, 0 warnings (strict mode).
 2. Optional data feeds: whitelist `https://financialmodelingprep.com` under
    Tools → Options → Expert Advisors → Allow WebRequest. The EA trades fine without it.
-3. Attach to an XAUUSD M1 chart, load a preset from `presets/`.
+3. Attach to an XAUUSD M1 chart. No preset needed — the EA's compiled-in defaults
+   ARE the production ultra-scalp profile; change any input directly in the EA
+   dialog. The `presets/` files remain as optional convenience snapshots.
 4. Check the Journal for the BROKER PROFILE block and `self-test PASS` lines; the panel
    shows live session windows, gate reasons, and risk state.
 5. **Demo first** — see the go-live gate in `docs/05_Validation_Protocol.md`.
@@ -96,13 +98,16 @@ keys are issued, hashed, and emailed automatically. Details:
 
 | File | Use |
 |---|---|
-| `XAUUSD_M1_UltraScalp.set` | Production profile — SR soft filter, license blank |
+| `XAUUSD_M1_UltraScalp.set` | Production profile snapshot — identical to the EA's compiled-in defaults |
 | `XAUUSD_M1_UltraScalp_SR_Off.set` | A/B baseline — SR module off (bit-identical legacy behavior) |
 | `XAUUSD_M1_UltraScalp_Advisory.set` | SR observes & logs, never blocks |
 | `XAUUSD_M1_UltraScalp_PropFirm.set` | Prop-firm guardrails: 2.0% daily loss, 4% trailing DD, 15 trades/day |
-| `XAUUSD_M1_UltraScalp_Licensed.set` | Production + license inputs ready (key blank, grace 720 min) |
 
-Regenerate all five after changing the profile or EA inputs:
+The former `XAUUSD_M1_UltraScalp_Licensed.set` was retired: the license inputs
+live in the EA itself (`InpLicenseKey` blank = local mode), and the production
+profile is now the EA's compiled-in default — subscribers only paste their key.
+
+Regenerate all four after changing the profile or EA inputs:
 
 ```
 python3 tools/build_presets.py
@@ -250,7 +255,7 @@ today/lifetime performance, per-window expectancy, and the 24 h UTC session map.
 ```
 Predict-A-Trade-Ultra.mq5        the EA — drop into MQL5/Experts/
 tools/build_presets.py           self-contained preset generator (stdlib only)
-presets/                         5 load-ready .set files (304 inputs each)
+presets/                         4 load-ready .set files (304 inputs each)
 license-server/                  optional Go license backend (compose stack, tests)
 docs/XAUUSD_M1_UltraScalp_Audit.md   per-input audit + effectiveness matrix
 docs/SR_Zones_Module.md          SR architecture, inputs, worked scoring example

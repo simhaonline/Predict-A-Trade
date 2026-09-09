@@ -75,59 +75,59 @@ input double InpScalpMinMomentumATR       = 0.08;      // simple engine: min las
 input double InpTP1SpreadMultiple         = 2.0;       // Phase 2.4: TP1 must exceed (spread+slippage) x this multiple, else TP1_TOO_TIGHT
 
 input group "=== CAPITAL PROTECTION ==="
-input double InpDailyLossPercent          = 4.0;
-input double InpMaxFloatingDDPercent      = 5.0;
-input double InpWeeklyLossLimit           = 8.0;
-input double InpMonthlyLossLimit          = 15.0;
-input double InpRiskPercent               = 0.50;
-input double InpRiskStepDownOnDD          = 0.10;
+input double InpDailyLossPercent          = 2.5;
+input double InpMaxFloatingDDPercent      = 3.0;
+input double InpWeeklyLossLimit           = 6.0;
+input double InpMonthlyLossLimit          = 10.0;
+input double InpRiskPercent               = 0.35;
+input double InpRiskStepDownOnDD          = 0.15;
 input int    InpMaxConsecutiveLosses      = 3;      // pause only after 3 straight; risk decays 30% per loss before that
-input int    InpMaxTradesPerDay           = 60;
+input int    InpMaxTradesPerDay           = 25;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
-input double InpMinLotMaxRiskPct          = 2.0;       // min-lot trade allowed only if its risk <= this % of balance
-input double InpMaxAggregateOpenRiskPct   = 4.00;
-input double InpMaxDirectionalRiskPct     = 2.50;
+input double InpMinLotMaxRiskPct          = 1.5;       // min-lot trade allowed only if its risk <= this % of balance
+input double InpMaxAggregateOpenRiskPct   = 2.5;
+input double InpMaxDirectionalRiskPct     = 1.5;
 input ENUM_BREAKER_ACTION InpBreakerAction= BREAKER_CLOSE_ALL;
 input bool   InpNoMartingale              = true;      // invariant; retained for audit visibility
 input bool   InpNoAveragingDown           = true;      // invariant; never add to losing exposure
 
 input group "=== BROKER / COST MODEL ==="
-input int    InpMaxSpreadPoints           = 45;      // hard cap; Xelans ECN gold runs 35-45pt
-input double InpSpreadSpikeRatio          = 2.50;
-input double InpMaxSpreadPercentile       = 92.0;     // p85 was below this broker's normal spread range
-input int    InpMaxSlippagePoints         = 30;
+input int    InpMaxSpreadPoints           = 35;      // hard cap; Xelans ECN gold runs 35-45pt
+input double InpSpreadSpikeRatio          = 2.0;
+input double InpMaxSpreadPercentile       = 90.0;     // p85 was below this broker's normal spread range
+input int    InpMaxSlippagePoints         = 25;
 input double InpCommissionPerLotRTFallback= 7.00;      // account-currency round trip / lot fallback
-input double InpExpectedSlipPtsFallback   = 4.0;
-input double InpMaxCostToTP1Pct           = 45.0;     // was 35: ECN spread pushed cost ratio over 35
+input double InpExpectedSlipPtsFallback   = 3.5;
+input double InpMaxCostToTP1Pct           = 40.0;     // was 35: ECN spread pushed cost ratio over 35
 input double InpMinNetProfitTP1Money      = 0.30;
 input double InpMinNetProfitTP2Money      = 0.50;
 input double InpMinNetProfitTP3Money      = 0.70;
 input int    InpOrderRetry                = 2;
 
 input group "=== RISK-REWARD VALIDATION ==="
-input double InpMinRR_TP2                 = 0.60;      // TP2 reward must beat this multiple of SL distance
-input double InpMinRR_TP3                 = 1.20;      // TP3 reward must beat this multiple of SL distance
+input double InpMinRR_TP2                 = 0.55;      // TP2 reward must beat this multiple of SL distance
+input double InpMinRR_TP3                 = 1.10;      // TP3 reward must beat this multiple of SL distance
 
 input group "=== EXECUTION / ANTI-OVERTRADING ==="
-input ENUM_EXECUTION_MODE InpExecutionMode= EXEC_AUTO;
+input ENUM_EXECUTION_MODE InpExecutionMode= EXEC_DIRECTIONAL;
 input int    InpStraddleLayers            = 1;
 input double InpLayerStepATR              = 0.35;
-input int    InpMaxConcurrentPositions    = 6;
-input double InpMaxTotalLots              = 3.00;
+input int    InpMaxConcurrentPositions    = 3;
+input double InpMaxTotalLots              = 1.20;
 input bool   InpArmWhileInTrade           = true;
-input bool   InpScaleIn                   = true;
-input int    InpMinSecondsBetweenEntries  = 15;     // was 120
+input bool   InpScaleIn                   = false;
+input int    InpMinSecondsBetweenEntries  = 20;     // was 120
 input int    InpMinBarsFreshStructure     = 2;
-input int    InpMaxSignalsPerWindow       = 20;
-input double InpPerWindowRiskBudgetPct    = 3.00;
+input int    InpMaxSignalsPerWindow       = 10;
+input double InpPerWindowRiskBudgetPct    = 1.5;
 input bool   InpOncePerValidatedEvent     = true;
 input bool   InpCancelStalePendings       = true;
-input int    InpPendingExpiryMinutes      = 5;
+input int    InpPendingExpiryMinutes      = 3;
 input double InpDistance                  = 1.00;
 input bool   InpUseATRForDistance         = true;
 input double InpATRMultiplier             = 0.22;
 input double InpLayerSpacingATR           = 0.25;
-input double InpLotSize                   = 0.10;
+input double InpLotSize                   = 0.05;
 
 input group "=== FILTERS / SMC ==="
 input ENUM_FILTER_MODE InpFilterMode      = FILTER_SCORING;
@@ -197,9 +197,9 @@ input int    InpNewYorkLocalCloseMin      = 17*60;      // 17:00 New York local
 input int    InpLondonOpenWindowMin       = 60;
 input int    InpNYOpenWindowMin           = 60;
 input int    InpOverlapPadMinutes         = 0;
-input double InpFridayCutoffServer        = 20.0;
+input double InpFridayCutoffServer        = 19.0;
 input bool   InpAutoDetectServerOffset    = true;
-input int    InpManualServerOffsetHours   = 2;
+input int    InpManualServerOffsetHours   = 3;
 input int    InpServerOffsetRefreshSec    = 60;
 
 input group "=== HIGH-VOLATILITY MODE ==="
@@ -216,27 +216,27 @@ input double InpVerifiedBucketVolRatio    = 1.10;
 
 input group "=== TP1 + TP2 + TP3 EXIT ENGINE ==="
 input bool   InpUseThreeTargets           = true;
-input double InpTP1Pct                    = 0.70;      // 70% off at TP1: scalp banking, small runner
+input double InpTP1Pct                    = 0.75;      // 70% off at TP1: scalp banking, small runner
 input double InpTP2Pct                    = 0.20;
-input double InpTP3Pct                    = 0.10;
+input double InpTP3Pct                    = 0.05;
 // Phase 2.5: lot-ladder feasibility. Decimal fractions ONLY (0.75 = 75%), must sum to 1.0.
 input bool            InpAutoDegradeTPLadder = true;                // 3-leg -> 2-leg -> 1-leg when the position is too small
 input ENUM_LADDER_MODE InpLadderRoundingMode = LADDER_FAVOR_TP1;    // where rounding residue goes
-input double InpSL_ATR_Multiplier         = 0.90;      // was 1.25: tighter stop improves ladder R:R
-input double InpSLStructureBufferATR      = 0.15;
-input double InpTP1_ATR_Floor             = 0.30;
-input double InpTP1_ATR_Cap               = 0.60;
-input double InpTP2_ATR_Floor             = 0.75;
-input double InpTP2_ATR_Cap               = 1.60;
-input double InpTP3_ATR_Floor             = 1.20;
-input double InpTP3_ATR_Cap               = 2.80;
+input double InpSL_ATR_Multiplier         = 0.80;      // was 1.25: tighter stop improves ladder R:R
+input double InpSLStructureBufferATR      = 0.12;
+input double InpTP1_ATR_Floor             = 0.25;
+input double InpTP1_ATR_Cap               = 0.40;
+input double InpTP2_ATR_Floor             = 0.60;
+input double InpTP2_ATR_Cap               = 1.10;
+input double InpTP3_ATR_Floor             = 1.00;
+input double InpTP3_ATR_Cap               = 1.80;
 input bool   InpUseCostAdjustedBE         = true;
-input double InpBEExtraLockATR            = 0.03;
+input double InpBEExtraLockATR            = 0.02;
 input bool   InpUseTP3StructureTrail      = true;
-input double InpTP3TrailATR               = 0.70;
-input double InpTP3TrailStepATR           = 0.15;
+input double InpTP3TrailATR               = 0.50;
+input double InpTP3TrailStepATR           = 0.10;
 input bool   InpTP3EarlyExit              = true;
-input int    InpMaxTradeMinutes           = 20;      // scalp: in-and-out; stale scalps die fast
+input int    InpMaxTradeMinutes           = 10;      // scalp: in-and-out; stale scalps die fast
 
 input group "=== NEWS / DISORDER PROTECTION ==="
 input bool   InpUseNewsFilter             = true;
@@ -286,8 +286,8 @@ input int    InpRecoveryMaxAgeSec         = 900;       // recovery opportunity e
 input double InpRecoveryMaxSpreadPts      = 35;        // tighter spread cap for recovery entries
 
 input group "=== SLIPPAGE / SWAP PROTECTION ==="
-input double InpMaxAverageSlippagePoints  = 18.0;     // 18pt avg is realistic for gold ECN fills; 10 blocked every re-entry
-input double InpExtremeSlippagePoints     = 30.0;     // 30pt on gold = genuinely pathological fill; pre-trade guard covers spikes
+input double InpMaxAverageSlippagePoints  = 15.0;     // 18pt avg is realistic for gold ECN fills; 10 blocked every re-entry
+input double InpExtremeSlippagePoints     = 25.0;     // 30pt on gold = genuinely pathological fill; pre-trade guard covers spikes
 input int    InpStopLevelBufferPoints     = 5;        // Phase 2.4/4.1: safety buffer above broker stops/freeze level
 input bool   InpRespectStopLevel          = true;     // enforce stops/freeze distance on every SR/proposed price
 input bool   InpValidateSymbolOnInit      = true;     // fail fast when the symbol is not fully tradeable

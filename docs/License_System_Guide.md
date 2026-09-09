@@ -78,8 +78,10 @@ Verify: `go test ./...` (routing, HTTPS enforcement, headers, key format), `go v
 
 ## 4. MT5 user setup
 
-1. Load a preset (e.g. `XAUUSD_M1_UltraScalp_Licensed.set`).
-2. Enter the purchased key into `InpLicenseKey`.
+1. Attach the EA to an XAUUSD M1 chart — no preset required. The production
+   profile is compiled into the EA's input defaults; the subscriber's only
+   required entry is the license key in `InpLicenseKey` (they may tune any other
+   input in the same dialog).
 3. Tools → Options → Expert Advisors → **Allow WebRequest for listed URL** → add the
    server base URL (e.g. `https://license.predictatrade.com`). Without this the EA logs the
    4014 fix hint and cannot reach the server.
