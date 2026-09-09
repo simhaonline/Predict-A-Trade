@@ -466,6 +466,7 @@ input group "=== LOGGING / DASHBOARD ==="
 input bool   InpUseLogFile                = true;
 input bool   InpPersistState              = true;
 input bool   InpShowDashboard             = true;
+input bool   InpRunInitSelfTests          = false;    // verbose init self-tests + multi-line diagnostics (debug only)
 input int    InpPanelX                    = 430;       // initial panel X (clear of left dock; drag header to move)
 input int    InpPanelY                    = 30;        // initial panel Y (drag header to move)
 input int    InpPanelFontSize             = 8;         // 6..12; 8 recommended - all values readable
@@ -5814,26 +5815,27 @@ int OnInit()
     if(sx>=0&&sy>=0&&sx<chartW-200&&sy<chartH-100){g_x=sx;g_y=sy;}
     else Print("DASHBOARD: saved panel position (",sx,",",sy,") outside this chart - resetting to default");}
    ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
-   PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();
+   if(InpRunInitSelfTests)PrintSessionMapAudit();   // [lean init] debug-only
+   UpdateRiskPeriods();if(InpPersistState)LoadState();
    //--- [SIGNAL QUALITY] weight validation + classification warm start (sections 42/44/45)
    InitConfidenceWeights();
    if(g_confTelemetry!="")Print("SIGNAL QUALITY: ",g_confTelemetry);
    g_options.available=false;g_options.timestamp=0;g_options.source="none";   // fail-open until a provider fills it
    UpdateStructureState();UpdateVolumeEngine();UpdateDirectionRegime();UpdateEnvironmentRegime();
    Print("DASHBOARD: panel at x=",g_x," y=",g_y," width=",g_panelW," height=",g_panelH," (drag header to move; click header to collapse/expand)");
-   Print("SIGNAL QUALITY: structure=",StructureStateName(g_structureState)," dirRegime=",DirectionRegimeName(g_dirRegime)," env=",EnvironmentRegimeName(g_envRegime)," vol=",VolumeStateName(g_volumeState)," (p",DoubleToString(g_volumePercentile,0),") threshold=",DoubleToString(EffectiveConfidenceThreshold(),1));
-   Print("TRADE GATES (PERCENTAGE/ADAPTIVE): spread <= ",DoubleToString(InpMaxSpreadPctOfSL,0),"% of SL distance (projected cap computed live from ATR) | slippage avg <= ",DoubleToString(InpMaxSlippagePctOfATR,1),"% ATR | confidence ",DoubleToString(InpMinConfidenceScore,0),"+ gap ",DoubleToString(InpMinDirectionalConfidenceGap,0)," | netRR per setup | loss-decay x0.70/loss (floor ",DoubleToString(InpRiskFloorPct,2),"%)");
+   if(InpRunInitSelfTests)Print("SIGNAL QUALITY: structure=",StructureStateName(g_structureState)," dirRegime=",DirectionRegimeName(g_dirRegime)," env=",EnvironmentRegimeName(g_envRegime)," vol=",VolumeStateName(g_volumeState)," (p",DoubleToString(g_volumePercentile,0),") threshold=",DoubleToString(EffectiveConfidenceThreshold(),1));
+   if(InpRunInitSelfTests)Print("TRADE GATES (PERCENTAGE/ADAPTIVE): spread <= ",DoubleToString(InpMaxSpreadPctOfSL,0),"% of SL distance | slippage avg <= ",DoubleToString(InpMaxSlippagePctOfATR,1),"% ATR | confidence ",DoubleToString(InpMinConfidenceScore,0),"+ gap ",DoubleToString(InpMinDirectionalConfidenceGap,0)," | netRR per setup | loss-decay floor ",DoubleToString(InpRiskFloorPct,2),"%");
    // [CAPITAL ENGINE] classify once at init + log the profile environment
    g_capitalProfile=GetCapitalProfile();
-   Print("CAPITAL ENGINE: profile=",CapitalProfileName(g_capitalProfile)," equity=",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)," ",broker.currency," equityUSD=",DoubleToString(GetEquityUSD(),2)," capitalBase=",DoubleToString(GetConservativeCapitalBase(),2)," baseRisk=",DoubleToString(GetProfileBaseRiskPct(),3),"% aggregate=",DoubleToString(GetProfileAggregateRiskPct(),2),"% maxPositions=",GetProfileMaxPositions(),(g_usdConvertNote!=""?" ["+g_usdConvertNote+"]":""));
-   CapitalSelfTest();
+   Print("Initialized: profile=",CapitalProfileName(g_capitalProfile)," eq=",DoubleToString(GetEquityUSD(),0)," risk=",DoubleToString(GetProfileBaseRiskPct(),2),"% maxPos=",GetProfileMaxPositions());
+   if(InpRunInitSelfTests)CapitalSelfTest();   // off by default: runtime diagnostics, not production spam
    // A consecutive-loss streak must never survive a restart as a halt: recount it from
    // real deal history (the persisted counter is a stats value, not a live breaker).
    if(InpPersistState)
    {
       g_consecutiveLosses=RecountConsecutiveLosses();
       if(g_consecutiveLosses<InpMaxConsecutiveLosses)g_stopDay=false;   // fresh start
-      Print("Consecutive losses recounted from history: ",g_consecutiveLosses,"/",InpMaxConsecutiveLosses);
+      if(InpRunInitSelfTests)Print("Consecutive losses recounted: ",g_consecutiveLosses,"/",InpMaxConsecutiveLosses);
    }OpenLog();IsNewBar();UpdateSpreadStats();UpdateIndicators();RefreshVolumeRatio();RefreshFMPMacro(true);UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();EventSetTimer(1);g_gateReason="initialized";DashUpdate(true);
    Print("Predict-A-Trade v1.00 initialized | ",eaSymbol," | digits=",broker.digits," ptScale=",g_ptScale," | server-UTC offset=",g_serverOffsetSec,"s | minVol=",broker.volumeMin," step=",broker.volumeStep," stops=",broker.stopsLevel," freeze=",broker.freezeLevel," hedging=",broker.hedging);
    Print("Broker: ",broker.company," | ",AccTypeName(broker.tradeMode)," account | leverage 1:",broker.leverage," | swap L/S ",DoubleToString(broker.swapLong,2),"/",DoubleToString(broker.swapShort,2));
@@ -5893,7 +5895,7 @@ void OnTick()
 
 void OnTimer()
 {
-   RefreshServerOffset(false);CheckNews(false);RefreshFMPMacro(false);EnforceSwapFlat();if(InpCancelStalePendings)DeleteOwnPendings(true);DashUpdate(true);SR_SelfTest();if(InpPersistState && (ServerNow()%30)==0)SaveState();
+   RefreshServerOffset(false);CheckNews(false);RefreshFMPMacro(false);EnforceSwapFlat();if(InpCancelStalePendings)DeleteOwnPendings(true);DashUpdate(true);if(InpRunInitSelfTests)SR_SelfTest();if(InpPersistState && (ServerNow()%30)==0)SaveState();
    // [CAPITAL ENGINE] profile recompute on the 1s timer: cheap (equity + cached FX),
    // detects deposits/withdrawals/equity drift across tier boundaries within a minute.
    g_capitalProfile=GetCapitalProfile();
