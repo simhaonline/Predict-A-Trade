@@ -4495,18 +4495,26 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       int want=(g_scalpSignal>0?1:-1);
       if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";GateHist("no scalp signal ("+g_scalpWhy+")");return false;}
       setup=g_scalpWhy;
-      //--- [WIN-EDGE] MARKET-BIAS GATE. Backtest showed 27 shorts vs 4 longs (87% short)
-      //--- with shorts winning only 48%: the engine was structurally fading the higher-TF
-      //--- trend. Require the H1/M15 EMA stack to agree with the trade direction before
-      //--- allowing it; this is a structural "don't fade the trend" rule, not a hard veto
-      //--- on the M1 setup itself. Tunable: InpSimpleBiasFilter on/off, InpSimpleBiasMinAlign.
+      //--- [WIN-EDGE] MARKET-BIAS GATE (scoped to TREND-FOLLOWING setups only).
+      //--- Root-cause regression: the original gate applied to ALL signals, including the
+      //--- mean-reversion book (VWAP reversion 1/-1, EMA20 baseline 5/-5). Reversion is
+      //--- counter-trend BY DESIGN (it shorts extensions in an up-trend), so blocking it
+      //--- whenever the HTF EMA stack loaded killed the entire trade flow after warmup.
+      //--- Fix: the bias gate now only polices the genuine trend-following setups
+      //--- (London breakout 2/-2, NY momentum 3/-3, EMA pullback 4/-4). Reversion is
+      //--- still protected by its own VWAP trend-gate in EvaluateScalpSignal().
       if(InpSimpleBiasFilter&&InpSimpleBiasMinAlign>0)
       {
-         int alignUp=0,alignDn=0;
-         if(g_m15e20>0&&g_m15e50>0){if(g_m15e20>g_m15e50)alignUp++;else if(g_m15e20<g_m15e50)alignDn++;}
-         if(g_h1e20>0&&g_h1e50>0){if(g_h1e20>g_h1e50)alignUp++;else if(g_h1e20<g_h1e50)alignDn++;}
-         if(dir>0&&alignDn>=InpSimpleBiasMinAlign){why="bias gate: HTF trend down, no long";GateHist("bias gate: HTF trend down, no long");return false;}
-         if(dir<0&&alignUp>=InpSimpleBiasMinAlign){why="bias gate: HTF trend up, no short";GateHist("bias gate: HTF trend up, no short");return false;}
+         int sig=g_scalpSignal;
+         bool isReversion=(sig==1||sig==-1||sig==5||sig==-5);
+         if(!isReversion)   // trend-following setups only; never veto reversion
+         {
+            int alignUp=0,alignDn=0;
+            if(g_m15e20>0&&g_m15e50>0){if(g_m15e20>g_m15e50)alignUp++;else if(g_m15e20<g_m15e50)alignDn++;}
+            if(g_h1e20>0&&g_h1e50>0){if(g_h1e20>g_h1e50)alignUp++;else if(g_h1e20<g_h1e50)alignDn++;}
+            if(dir>0&&alignDn>=InpSimpleBiasMinAlign){why="bias gate: HTF trend down, no long";GateHist("bias gate: HTF trend down, no long");return false;}
+            if(dir<0&&alignUp>=InpSimpleBiasMinAlign){why="bias gate: HTF trend up, no short";GateHist("bias gate: HTF trend up, no short");return false;}
+         }
       }
       //--- [MTF-Soft] higher-TF stacks act through the confidence score (bonus/penalty),
       //--- NOT as a hard veto: an M1 setup with 0/3 alignment still trades (smaller
