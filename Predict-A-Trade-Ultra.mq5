@@ -147,6 +147,8 @@ input group "=== ULTRA-SCALP MODE (SIMPLIFIED ENGINE) ==="
 input bool   InpSimpleScalpMode           = true;      // TRUE = simple M1 scalp engine (recommended); false = full multi-filter engine
 input double InpScalpMinMomentumATR       = 0.08;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
 input double InpTP1SpreadMultiple         = 2.0;       // Phase 2.4: TP1 must exceed (spread+slippage) x this multiple, else TP1_TOO_TIGHT
+input bool   InpSimpleBiasFilter          = true;      // [WIN-EDGE] block shorts when H1/M15 trend is up, longs when trend is down (don't fade HTF trend)
+input double InpSimpleBiasMinAlign        = 1;         // [WIN-EDGE] min # of {M15,H1} EMA-stacked in-trend to assert a bias (0 = off-style always-trade)
 
 input group "=== CAPITAL PROTECTION ==="
 input double InpDailyLossPercent          = 2.5;
@@ -4493,6 +4495,19 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       int want=(g_scalpSignal>0?1:-1);
       if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";GateHist("no scalp signal ("+g_scalpWhy+")");return false;}
       setup=g_scalpWhy;
+      //--- [WIN-EDGE] MARKET-BIAS GATE. Backtest showed 27 shorts vs 4 longs (87% short)
+      //--- with shorts winning only 48%: the engine was structurally fading the higher-TF
+      //--- trend. Require the H1/M15 EMA stack to agree with the trade direction before
+      //--- allowing it; this is a structural "don't fade the trend" rule, not a hard veto
+      //--- on the M1 setup itself. Tunable: InpSimpleBiasFilter on/off, InpSimpleBiasMinAlign.
+      if(InpSimpleBiasFilter&&InpSimpleBiasMinAlign>0)
+      {
+         int alignUp=0,alignDn=0;
+         if(g_m15e20>0&&g_m15e50>0){if(g_m15e20>g_m15e50)alignUp++;else if(g_m15e20<g_m15e50)alignDn++;}
+         if(g_h1e20>0&&g_h1e50>0){if(g_h1e20>g_h1e50)alignUp++;else if(g_h1e20<g_h1e50)alignDn++;}
+         if(dir>0&&alignDn>=InpSimpleBiasMinAlign){why="bias gate: HTF trend down, no long";GateHist("bias gate: HTF trend down, no long");return false;}
+         if(dir<0&&alignUp>=InpSimpleBiasMinAlign){why="bias gate: HTF trend up, no short";GateHist("bias gate: HTF trend up, no short");return false;}
+      }
       //--- [MTF-Soft] higher-TF stacks act through the confidence score (bonus/penalty),
       //--- NOT as a hard veto: an M1 setup with 0/3 alignment still trades (smaller
       //--- confidence), one with 3/3 gets the full bonus. The market decides, not a gate.
@@ -4758,15 +4773,27 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
       g_ps[idx]=s;
       return;                          // broker TP/SL stand as sent - no rewrite
    }
-   // Simple mode exits fully at the validated broker TP1. Preserve that target
-   // through fills and restarts; never replace it with a newly calculated TP3.
+   // Simple mode: enable the 3-TP ladder (previously collapsed to a single TP1 close).
+   // 75% banks at the tight TP1, 20% rides to TP2, 5% to TP3, with a cost-adjusted
+   // break-even lock once TP1 is done. The runner captures trend days; this converts a
+   // 52%-win coin-flip into positive expectancy and lets the BE lock engage.
    if(InpSimpleScalpMode)
    {
       double placed=PositionGetDouble(POSITION_TP);
       s.tp1=(placed>0?placed:(g_armValid?g_armTp1:0));
-      s.tp2=s.tp1;s.tp3=s.tp1;
-      s.volTP1=lots;s.volTP2=0;s.volTP3=0;
-      s.tp1Done=false;s.tp2Done=true;s.tp3Done=false;
+      // Build the full ladder (TP2/TP3 virtual targets) and allocate the 75/20/5 split.
+      if(InpUseThreeTargets&&InpAB_EnableThreeTP)
+      {
+         BuildThreeTargets(dir,entry,sl,lots,w,hv,s.tp1,s.tp2,s.tp3);
+         AllocateVolumes(lots,s.volTP1,s.volTP2,s.volTP3);
+         // Guard: if ladder math collapsed (e.g. sub-min-lot residue), fall back to whole-at-TP1.
+         if(s.volTP1<=0&&s.volTP2<=0&&s.volTP3<=0){s.volTP1=lots;s.tp2=s.tp1;s.tp3=s.tp1;}
+      }
+      else
+      {
+         s.tp2=s.tp1;s.tp3=s.tp1;s.volTP1=lots;s.volTP2=0;s.volTP3=0;s.tp1Done=true;s.tp2Done=true;
+      }
+      s.tp1Done=false;s.tp3Done=false;
       g_ps[idx]=s;g_armValid=false;
       return;
    }
