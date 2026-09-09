@@ -1553,7 +1553,7 @@ double MinTradeDistance()
 //--- These are the code equivalents of the complex-mode inputs:
 //---   SCALP_TP1_ATR ~ InpTP1_ATR_Floor/Cap midpoint, SCALP_SL_ATR ~ InpSL_ATR_Multiplier.
 //--- Distance = ATR multiple (volatility-adjusted); volume split = decimal fraction (Phase 2.1).
-const double SCALP_TP1_ATR   = 0.55;   // [P8] TP1 distance - post-cost viable scalp target (prompt.md #8)
+const double SCALP_TP1_ATR   = 0.85;   // [FIX win%] TP1 >= SL (0.80 ATR) so simple-mode scalp is >=1R, not 0.69R bleed
 const double SCALP_TP2_TOT   = 0.75;   // TP2 distance from entry (InpTP2_ATR_Floor 0.60..Cap 1.10)
 const double SCALP_TP3_TOT   = 1.15;   // TP3 distance from entry (InpTP3_ATR_Floor 1.00..Cap 1.80)
 const double SCALP_SL_ATR    = 0.80;   // trend-pullback / momentum stop (InpSL_ATR_Multiplier)
@@ -2555,8 +2555,11 @@ void EvaluateScalpSignal()
       bool extUp=(dev>=1.5),extDn=(dev<=-1.5);
       bool confDn=(c1<o1)||(c1<vwapRef);          // close back below the mean OR a red bar
       bool confUp=(c1>o1)||(c1>vwapRef);          // close back above the mean OR a green bar
-      if(extUp&&confDn){g_scalpSignal=-2;g_scalpWhy="VWAP reversion SHORT";return;}
-      if(extDn&&confUp){g_scalpSignal=2;g_scalpWhy="VWAP reversion LONG";return;}
+      // [FIX win%] Reversion must NOT fight a strong trend: a down-extension fade
+      // (LONG) is only taken when the trend is not down; an up-extension fade (SHORT)
+      // only when the trend is not up. This converts blind fades into pullback entries.
+      if(extUp&&confDn&&!m5Up){g_scalpSignal=-2;g_scalpWhy="VWAP reversion SHORT";return;}
+      if(extDn&&confUp&&!m5Dn){g_scalpSignal=2;g_scalpWhy="VWAP reversion LONG";return;}
    }
 
    //================= MODE C: LONDON OPEN BREAKOUT (07:00-08:15 UTC) ==============
@@ -2596,7 +2599,9 @@ void EvaluateScalpSignal()
    //================= MODE D: NY OPEN MOMENTUM (13:30-15:30 UTC) ==================
    // Liquidity peak (BIS data); deploy momentum with the trend, not fades.
    // Uses the shared degraded-graceful m5Up/m5Dn (fallback M1 EMAs when M5 absent).
-   if(InWindowMinutes(um,WrapMin(no+30),WrapMin(no+150))&&m5Present)
+   // [FIX win%] relax the hard M5-present gate: momentum may fire on the M1-trend
+   // fallback (m5Up/m5Dn already degrade to M1 EMAs) so the book is not 100% reversion.
+   if(InWindowMinutes(um,WrapMin(no+30),WrapMin(no+150))&&(m5Present||(g_ema20!=g_ema50)))
    {
       // M1 momentum burst closing beyond the 15-bar high/low with M5 trend
       double hh=-DBL_MAX,ll=DBL_MAX;
@@ -4227,7 +4232,7 @@ double ScalpTarget1(int dir,double entry)
    {
       // reversion: target the mean (VWAP), min 0.6 ATR away
       double d=MathAbs(g_vwap-entry);
-      if(d<0.6*atr)d=0.6*atr;
+      if(d<0.8*atr)d=0.8*atr;   // [FIX win%] VWAP reversion target must clear >=1R vs its 0.45 ATR stop
       return PriceNorm(entry+dir*d);
    }
    // breakout/momentum/pullback: fixed ~2R-style via 0.40 ATR (stop is 0.80-0.85 ATR)
@@ -4291,9 +4296,9 @@ bool NetProfitValid(int dir,double entry,double target,double lots,double minMon
 void BuildThreeTargets(int dir,double entry,double sl,double lots,ENUM_WINDOW_ID w,bool hv,double &tp1,double &tp2,double &tp3)
 {
    double atr=g_atr*SpreadCompensationFactor(),k=RegimeTPMultiplier(w,hv);   // [B8 FIX]
-   double d1=MathMax(InpTP1_ATR_Floor*atr,MathMin(InpTP1_ATR_Cap*atr,0.55*atr))*k;
-   double d2=MathMax(InpTP2_ATR_Floor*atr,MathMin(InpTP2_ATR_Cap*atr,1.10*atr))*k;
-   double d3=MathMax(InpTP3_ATR_Floor*atr,MathMin(InpTP3_ATR_Cap*atr,1.85*atr))*(hv?1.05:1.0);
+   double d1=MathMax(InpTP1_ATR_Floor*atr,MathMin(InpTP1_ATR_Cap*atr,0.85*atr))*k;
+   double d2=MathMax(InpTP2_ATR_Floor*atr,MathMin(InpTP2_ATR_Cap*atr,1.40*atr))*k;
+   double d3=MathMax(InpTP3_ATR_Floor*atr,MathMin(InpTP3_ATR_Cap*atr,2.10*atr))*(hv?1.05:1.0);
    tp1=entry+dir*d1;tp2=entry+dir*d2;tp3=entry+dir*d3;
    // [SR] snap legs to nearby zone edges BEFORE validation so the existing
    // monotonic/cost machinery re-validates on the snapped prices (constraint 7)
