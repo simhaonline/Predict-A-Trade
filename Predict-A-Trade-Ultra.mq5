@@ -2642,6 +2642,20 @@ void EvaluateScalpSignal()
       if(stretchedDn&&resumedUp&&g_ema20>g_ema50){g_scalpSignal=5;g_scalpWhy="EMA20 reversion LONG";return;}
       if(stretchedUp&&resumedDn&&g_ema20<g_ema50){g_scalpSignal=-5;g_scalpWhy="EMA20 reversion SHORT";return;}
    }
+   //--- [LIVE DIAG] throttled (every ~20s). The tester-only SIGDIAG never prints on
+   //--- live, so when g_indicatorsReady is true but g_scalpSignal stays 0 this line
+   //--- reveals the dead condition: vwapDev (needs +-1.5), m5Up/m5Dn (VWAP reversion
+   //--- is gated by these), um (session window), and c1-ema20 (baseline needs +-0.6).
+   static long _lastDiagMs=0;
+   if(TimeLocal()*1000-_lastDiagMs>20000)
+   {
+      _lastDiagMs=TimeLocal()*1000;
+      double vdev=(vwapRef>0?(c1-vwapRef)/g_atr:0);
+      Print("SCALP_DIAG sig=",g_scalpSignal," why=[",g_scalpWhy,"] vwapDev=",DoubleToString(vdev,2),
+            " m5Up=",m5Up," m5Dn=",m5Dn," um=",um,
+            " EMA20>50=",(g_ema20>g_ema50)," c1-ema20=",DoubleToString((c1-g_ema20)/g_atr,2),
+            " ATR=",DoubleToString(g_atr,2)," ready=",g_indicatorsReady);
+   }
 }
 
 //====================================================================
