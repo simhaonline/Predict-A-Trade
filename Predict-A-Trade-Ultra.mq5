@@ -2497,6 +2497,17 @@ void EvaluateFilters()
 void EvaluateScalpSignal()
 {
    g_scalpSignal=0;g_scalpWhy="";
+   //--- [DIAG] every 200 bars in the tester, print the signal-layer preconditions so
+   //--- a zero-signal backtest shows exactly which input is dead (0 cache = M5/H1 data
+   //--- never arrived, VWAP=0 = anchor problem, etc.)
+   static long diagN=0;diagN++;
+   if(MQLInfoInteger(MQL_TESTER)&&(diagN%200)==1)
+      Print("SIGDIAG bars=",diagN," ATR=",DoubleToString(g_atr,2)," EMA20=",DoubleToString(g_ema20,broker.digits),
+            " M5e20=",DoubleToString(g_m5e20,broker.digits)," M5e50=",DoubleToString(g_m5e50,broker.digits),
+            " M5adx=",DoubleToString(g_m5adx,1)," RSI=",DoubleToString(g_rsi,1),
+            " VWAP=",DoubleToString(g_vwap,broker.digits)," bbMid=",DoubleToString(g_bbMid,broker.digits),
+            " mtf M15=",DoubleToString(g_m15e20,broker.digits)," M30=",DoubleToString(g_m30e20,broker.digits),
+            " H1=",DoubleToString(g_h1e20,broker.digits));
    double c1=iClose(eaSymbol,PERIOD_M1,1),o1=iOpen(eaSymbol,PERIOD_M1,1);
    double h1=iHigh(eaSymbol,PERIOD_M1,1),l1=iLow(eaSymbol,PERIOD_M1,1);
    double c2=iClose(eaSymbol,PERIOD_M1,2),h2=iHigh(eaSymbol,PERIOD_M1,2),l2=iLow(eaSymbol,PERIOD_M1,2);
@@ -2509,9 +2520,10 @@ void EvaluateScalpSignal()
    //================= MODE B: VWAP MEAN REVERSION (any session) ==================
    // Documented gold edge: 68-73% reversion after 2-sigma extension. Relaxed from
    // the too-strict v2 (1.8 ATR + RSI72 + candle + ADX<30 all at once = never fires).
-   if(g_vwap>0&&g_rsi>0)
+   double vwapRef=(g_vwap>0?g_vwap:g_bbMid);   // [FIX] BB-mid fallback when VWAP anchor fails
+   if(vwapRef>0&&g_rsi>0)
    {
-      double dev=(c1-g_vwap)/g_atr;
+      double dev=(c1-vwapRef)/g_atr;
       bool extUp=(dev>=1.5),extDn=(dev<=-1.5);
       // confirmation: reversal candle OR Bollinger band recross (either)
       bool confDn=(c1<o1)||(c1<g_bbMid);
@@ -2558,7 +2570,11 @@ void EvaluateScalpSignal()
    // Liquidity peak (BIS data); deploy momentum with the trend, not fades.
    if(InWindowMinutes(um,WrapMin(no+30),WrapMin(no+150)))
    {
-      bool m5Up=(g_m5e20>g_m5e50),m5Dn=(g_m5e20<g_m5e50);
+      //--- [FIX] M5 cache fallback: if the M5 data hasn't arrived (zero caches, common
+      //--- in early tester bars / cold attach), derive trend from the M1 EMAs so the
+      //--- setups keep firing instead of silently dying on missing higher-TF data.
+      bool m5Up=((g_m5e20>0&&g_m5e50>0)?g_m5e20>g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20>g_ema50:false));
+      bool m5Dn=((g_m5e20>0&&g_m5e50>0)?g_m5e20<g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20<g_ema50:false));
       // M1 momentum burst closing beyond the 15-bar high/low with M5 trend
       double hh=-DBL_MAX,ll=DBL_MAX;
       double bars[15];
@@ -2578,7 +2594,8 @@ void EvaluateScalpSignal()
    // Simplified: M5 trend + last bar closed back across EMA20 in trend direction
    // after being on the wrong side of it (the dip happened, the resumption confirms).
    {
-      bool m5Up=(g_m5e20>g_m5e50),m5Dn=(g_m5e20<g_m5e50);
+      bool m5Up=((g_m5e20>0&&g_m5e50>0)?g_m5e20>g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20>g_ema50:false));
+      bool m5Dn=((g_m5e20>0&&g_m5e50>0)?g_m5e20<g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20<g_ema50:false));
       bool wasBelow=(iClose(eaSymbol,PERIOD_M1,3)<g_ema20||iLow(eaSymbol,PERIOD_M1,1)<=g_ema20);
       bool wasAbove=(iClose(eaSymbol,PERIOD_M1,3)>g_ema20||iHigh(eaSymbol,PERIOD_M1,1)>=g_ema20);
       double reclaimTol=0.10*g_atr;   // [FIX] huge bars blow through EMA20; a close within tolerance counts as the reclaim
