@@ -190,7 +190,7 @@ input double InpRecoverySpreadQualityMultiplier = 0.80; // recovery requires thi
 input double InpCatastropheNoSLRiskPct    = 5.0;       // no-SL open positions count as this % risk (conservative policy)
 
 input group "=== BROKER / COST MODEL ==="
-input int    InpMaxSpreadPoints           = 35;      // hard sanity fallback only - PERCENTAGE gate is primary (below)
+input int    InpMaxSpreadPoints           = 0;       // OPTIONAL absolute points cap; 0 = disabled (percentage gate below is the control)
 input double InpMaxSpreadPctOfSL          = 100.0;   // [PERCENTAGE GATE] spread may consume at most this % of the SL distance (broker-adaptive; geometry auto-widens)
 input double InpMaxSlippagePctOfATR       = 5.0;     // avg slippage <= this % of ATR (percentage form)
 input double InpExtremeSlippagePctOfATR   = 12.0;    // last-fill slippage extreme <= this % of ATR
@@ -261,8 +261,8 @@ input double InpSuperTrendMultiplier      = 3.0;
 input int    InpADXPeriod                 = 14;
 input double InpMinADX                    = 22.0;
 input int    InpATRPeriod                 = 14;
-input double InpMinATRPoints              = 25;
-input double InpMaxATRPoints              = 600;      // gold M1 ATR regularly exceeds 350pt
+input double InpMinATRPctOfPrice          = 0.005;   // [PERCENTAGE] ATR floor as % of mid-price (dead-market filter; broker-independent)
+input double InpMaxATRPctOfPrice          = 0.10;    // [PERCENTAGE] ATR ceiling as % of mid-price (chaos filter; 0=disabled)
 input int    InpATRPercentileLookback     = 240;
 input double InpHVMinATRPercentile        = 65.0;
 input int    InpVolumeMA                  = 30;
@@ -1378,6 +1378,7 @@ double g_spreadBuf[SPREAD_SAMPLES]; int g_spreadCnt=0,g_spreadIdx=0; double g_sp
 double g_spreadStd=0;
 #define SLIP_SAMPLES 64
 double g_slipBuf[SLIP_SAMPLES]; int g_slipCnt=0,g_slipIdx=0; double g_slipAvg=0;
+double  g_lastSpreadCapPts   = 0;     // last computed percentage-based spread cap (dashboard)
 #define ATR_SAMPLES 512
 int g_atrKeep=512;                     // effective ring size = min(ATR_SAMPLES, InpATRPercentileLookback)
 double g_atrBuf[ATR_SAMPLES]; int g_atrCnt=0,g_atrIdx=0;
@@ -1877,9 +1878,10 @@ double AdaptiveSpreadCap(double slDist)
    //--- percentage-of-SL budget in price terms
    double pctCap=(g_atr>0&&slDist>0?slDist*InpMaxSpreadPctOfSL/100.0:0);
    double pctPts=(broker.point>0&&pctCap>0?pctCap/broker.point:0);
-   //--- the absolute legacy cap remains a last-resort ceiling: take the LOOSER of the two
-   //--- so no broker with a legitimately wider (but economically viable) feed is blocked
-   return MathMax((double)InpMaxSpreadPoints*g_ptScale,pctPts);
+   //--- optional absolute sanity cap: ONLY participates when the user sets it >0.
+   //--- Default 0 = pure percentage control (broker-adaptive; no fixed points anywhere).
+   if(InpMaxSpreadPoints<=0)return pctPts;
+   return MathMin((double)InpMaxSpreadPoints*g_ptScale,pctPts);
 }
 
 //--- [BROKER ADAPTATION] scale the scalp geometry so a wide-spread broker keeps
@@ -4288,13 +4290,17 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    //--- (SCALP_SL_ATR x ATR in simple mode; InpSL_ATR_Multiplier x ATR in complex mode)
    double projSL=MathMax(g_atr,MinTradeDistance())*SpreadCompensationFactor()*(InpSimpleScalpMode?SCALP_SL_ATR:InpSL_ATR_Multiplier);
    double spCap=AdaptiveSpreadCap(projSL);
+   g_lastSpreadCapPts=spCap;   // dashboard display
    if(sp>spCap){why="spread hard cap (cap "+DoubleToString(spCap,0)+"pt)";return false;}
    if(sp>=(spCap+20)*g_ptScale){why="spread extreme";return false;}   // broken feed
    // [SPREAD] adaptive relative gate after warmup (section 26): ATR-ratio + percentile
    // + spike conditions; emergency closes never pass through here.
    if(!AdaptiveSpreadOK(g_atr,why))return false;
    double atrPts=(broker.point>0?g_atr/broker.point:0);
-   if(atrPts<InpMinATRPoints*g_ptScale){why="ATR chop";return false;}
+   //--- [PERCENTAGE] ATR floor as % of mid-price: broker/digit-independent dead-market filter
+   double mid=(SymbolInfoDouble(eaSymbol,SYMBOL_BID)+SymbolInfoDouble(eaSymbol,SYMBOL_ASK))/2.0;
+   double atrFloorPrice=mid*InpMinATRPctOfPrice/100.0;
+   if(g_atr<atrFloorPrice){why="ATR chop";return false;}
    // ============ ULTRA-SCALP SIMPLE PATH (default) ============
    // Momentum + spread + risk. The multi-filter machinery below is only for
    // InpSimpleScalpMode=false. A scalp engine must fire on clean setups, not
@@ -4340,7 +4346,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    if(g_lastSlipPts>=AdaptiveExtremeSlippagePts()&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";return false;}
    if(!ExternalDataReady(why))return false;
    double spp=SpreadPercentile();if(g_spreadAvg>0&&sp>g_spreadAvg*InpSpreadSpikeRatio){why="spread spike";return false;}if(spp>InpMaxSpreadPercentile){why="spread percentile";return false;}
-   if(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale){why="ATR chaos";return false;}
+   if(InpMaxATRPctOfPrice>0&&g_atr>mid*InpMaxATRPctOfPrice/100.0){why="ATR chaos";return false;}
    double disp=CandleDisplacementATR();if(disp>InpMaxChaseCandleATR){why="anti-chase displacement";return false;}double cc=iClose(eaSymbol,PERIOD_M1,1);if(g_vwap>0&&g_atr>0&&MathAbs(cc-g_vwap)/g_atr>InpMaxEntryVWAPDeviationATR){why="anti-chase VWAP distance";return false;}
    if(InpFilterMode==FILTER_ALL_REQUIRED&&g_score<g_scoreMax){why="filters";return false;}
    g_score+=SR_DirectionalVote(dir,(dir>0?Ask():Bid()),g_atr);   // [SR] complex-mode vote: -1..+1, can never satisfy MinFilterScore alone
@@ -5456,10 +5462,10 @@ void DashUpdate(bool force=false)
    string ovShort=(ovLONNY?"L+NY":(ovTOKLON?"T+L":(ovSYDTOK?"S+T":"--")));
    string utcHM=StringFormat("%02d:%02d",um/60,um%60);
    DashRow("L_TIME",0,yL,"OVL "+ovShort+"  SRV "+TimeToString(ServerNow(),TIME_SECONDS)+"  UTC "+utcHM,C_TXT);
-   DashRow("L_SPRD",0,yL,"Spread "+DoubleToString(sp,0)+"pt (p"+DoubleToString(spp,0)+")",
-           (sp>InpMaxSpreadPoints*g_ptScale?C_DN_TXT:(spp>InpMaxSpreadPercentile?C_WARN_TXT:C_TXT)));
-   DashRow("L_ATR",0,yL,"ATR "+IntegerToString(atrPts)+"pt (p"+DoubleToString(ap,0)+") ["+DoubleToString(InpMinATRPoints*g_ptScale,0)+".."+DoubleToString(InpMaxATRPoints*g_ptScale,0)+"]",
-           (atrPts<InpMinATRPoints*g_ptScale||(InpMaxATRPoints>0&&atrPts>InpMaxATRPoints*g_ptScale)?C_WARN_TXT:C_TXT));
+      DashRow("L_SPRD",0,yL,"Spread "+DoubleToString(sp,0)+"pt (p"+DoubleToString(spp,0)+")",
+           (spp>InpMaxSpreadPercentile?C_DN_TXT:(sp>g_lastSpreadCapPts?C_WARN_TXT:C_TXT)));
+   DashRow("L_ATR",0,yL,"ATR "+DoubleToString(g_atr,2)+" (p"+DoubleToString(ap,0)+") ["+DoubleToString(mid*InpMinATRPctOfPrice/100.0,2)+".."+(InpMaxATRPctOfPrice>0?DoubleToString(mid*InpMaxATRPctOfPrice/100.0,2):"off")+"]",
+           (g_atr<mid*InpMinATRPctOfPrice/100.0||(InpMaxATRPctOfPrice>0&&g_atr>mid*InpMaxATRPctOfPrice/100.0)?C_WARN_TXT:C_TXT));
    string phLbl=SessionPhaseLabel(um,WindowOpenMin(w,so,sc,to,tc,lo,lc,no,nc),WindowCloseMin(w,so,sc,to,tc,lo,lc,no,nc));
    DashRow("L_VOL",0,yL,"Vol x"+DoubleToString(g_volRatio,2)+"  Phase "+phLbl,
            (g_volRatio>=InpMinVolumeRatio?C_TXT:C_DIM));
