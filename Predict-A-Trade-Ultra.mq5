@@ -1315,6 +1315,10 @@ bool LicenseTradingAllowed()
 //--- LicenseCheckGate(): top-of-tick guard. Returns false when trading must stop.
 bool LicenseCheckGate()
 {
+   // Strategy Tester: WebRequest is unavailable, so license activation can never land.
+   // License enforcement is a live/demo concern (server-side seat binding); the tester
+   // must be able to validate the STRATEGY - otherwise every backtest returns 0 trades.
+   if(MQLInfoInteger(MQL_TESTER))return true;
    if(LicenseTradingAllowed())return true;
    if(InpLicenseKey!="" && !g_licenseActive && g_licenseLastReason!="")
       g_gateReason="LICENSE: "+g_licenseLastReason;
@@ -6029,7 +6033,9 @@ int OnInit()
                                 IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"|"+
                                 AccountInfoString(ACCOUNT_SERVER));
       LicenseSelfTest();
-      if(!LicenseActivate())   // immediate first validation
+      if(MQLInfoInteger(MQL_TESTER))
+         Print("LICENSE: Strategy Tester detected - activation skipped (no WebRequest in tester); live/demo licensing enforced on real charts");
+      else if(!LicenseActivate())   // immediate first validation
       {
          // TRANSPORT failure (1009/1001/1003 middlebox/edge class) must NOT kill the EA:
          // the terminal would deinit and the user would have to manually re-attach until
@@ -6156,7 +6162,7 @@ void OnTimer()
    // [CAPITAL ENGINE] profile recompute on the 1s timer: cheap (equity + cached FX),
    // detects deposits/withdrawals/equity drift across tier boundaries within a minute.
    g_capitalProfile=GetCapitalProfile();
-   if(InpLicenseKey!="" && TimeCurrent()>=g_nextLicenseCheck)   // [LICENSE] WebRequest ONLY here, never in hot paths
+   if(!MQLInfoInteger(MQL_TESTER) && InpLicenseKey!="" && TimeCurrent()>=g_nextLicenseCheck)   // [LICENSE] tester has no network - skip polling
    {
       CheckLicense();
       // healthy: poll every 10 min. PENDING activation (transport blip at init): retry
