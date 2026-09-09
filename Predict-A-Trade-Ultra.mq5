@@ -182,7 +182,7 @@ input double InpRiskReduceExpectancyR     = 0.05;      // R expectancy below thi
 input double InpMaxNewTradeMarginPct      = 20.0;      // new-trade margin <= this % of equity (OrderCalcMargin)
 input double InpMinFreeMarginReservePct   = 50.0;      // projected free margin must stay >= this % of equity
 input bool   InpUseAdaptiveSpreadGate     = true;      // relative multi-condition spread gate (warmup = legacy fixed)
-input double InpMaxSpreadToATRPct         = 20.0;      // spread/ATR ceiling % (adaptive gate)
+input double InpMaxSpreadToATRPct         = 150.0;     // [FIX] gold M1: spread/ATR is routinely 50-150%; 20% was a forex-major number that vetoed every bar
 input double InpMaxSpreadPercentileAdaptive = 90.0;    // spread percentile ceiling (adaptive gate)
 input double InpSpreadBaselineMultiplier  = 2.0;       // spread vs rolling-average spike ratio (adaptive gate)
 input int    InpSpreadWarmupSamples       = 30;        // ticks before the adaptive spread gate arms
