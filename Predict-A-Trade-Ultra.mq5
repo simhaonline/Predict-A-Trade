@@ -4241,8 +4241,9 @@ int OnInit()
    {
       if(StringFind(InpLicenseServerURL,"https://")!=0)
       {Print("INIT FAILED: InpLicenseServerURL must start with https://");return INIT_PARAMETERS_INCORRECT;}
-      g_machineId=LicenseSHA256(TerminalInfoString(TERMINAL_COMPUTER_NAME)+"|"+
-                                TerminalInfoString(TERMINAL_DATA_PATH)+"|"+
+      // TERMINAL_COMPUTER_NAME is missing in older MetaEditor builds; the terminal
+      // data path (unique per install) + account + server bind the seat just as well.
+      g_machineId=LicenseSHA256(TerminalInfoString(TERMINAL_DATA_PATH)+"|"+
                                 IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"|"+
                                 AccountInfoString(ACCOUNT_SERVER));
       LicenseSelfTest();
