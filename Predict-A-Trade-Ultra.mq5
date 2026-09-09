@@ -37,6 +37,50 @@ enum ENUM_BREAKER_ACTION  { BREAKER_BLOCK_ONLY=0, BREAKER_CLOSE_ALL=1 };
 enum ENUM_HV_MODE         { HV_OFF=0, HV_AUTO=1, HV_FORCE_GATED=2 };
 enum ENUM_SR_MODE         { SR_ADVISORY=0, SR_SOFT_FILTER=1, SR_HARD_FILTER=2 };
 enum ENUM_LADDER_MODE     { LADDER_FAVOR_TP1=0, LADDER_FAVOR_RUNNER=1, LADDER_PROPORTIONAL=2 };
+//--- [SIGNAL QUALITY] explicit market-structure classification (prompt.md section 3)
+enum ENUM_STRUCTURE_STATE
+{
+   STRUCTURE_UNKNOWN=0,
+   STRUCTURE_HH_HL,
+   STRUCTURE_LH_LL,
+   STRUCTURE_TRANSITION_BULL,
+   STRUCTURE_TRANSITION_BEAR,
+   STRUCTURE_RANGE
+};
+//--- [SIGNAL QUALITY] volume distribution state (section 7)
+enum ENUM_VOLUME_STATE
+{
+   VOLUME_LOW=0,
+   VOLUME_NORMAL,
+   VOLUME_ELEVATED,
+   VOLUME_SPIKE,
+   VOLUME_EXTREME
+};
+//--- [SIGNAL QUALITY] two-dimensional regime (section 8): direction and environment
+//--- are INDEPENDENT dimensions - never forced into one mutually-exclusive enum.
+enum ENUM_DIRECTION_REGIME
+{
+   REGIME_STRONG_BULLISH=0,
+   REGIME_BULLISH,
+   REGIME_SIDEWAYS,
+   REGIME_BEARISH,
+   REGIME_STRONG_BEARISH
+};
+enum ENUM_ENVIRONMENT_REGIME
+{
+   ENV_NORMAL=0,
+   ENV_HIGH_VOLATILITY,
+   ENV_EXTREME_VOLATILITY,
+   ENV_LOW_LIQUIDITY,
+   ENV_DISORDER
+};
+//--- [SIGNAL QUALITY] centralized decision (section 12)
+enum ENUM_SIGNAL_DECISION
+{
+   SIGNAL_NO_TRADE=0,
+   SIGNAL_BUY=1,
+   SIGNAL_SELL=-1
+};
 //--- [CAPITAL ENGINE] account capital tier (prompt.md section 4). Classification uses
 //--- USD-EQUIVALENT EQUITY ONLY; risk money itself stays in account currency.
 enum ENUM_CAPITAL_PROFILE
@@ -222,6 +266,55 @@ input double InpMinVolumeRatio            = 1.20;
 input double InpHVMinVolumeRatio          = 1.35;
 input double InpMinLiquidityLevel         = 0.90;
 input int    InpRSIPeriod                 = 9;
+
+input group "=== SIGNAL QUALITY / CONFIDENCE ENGINE (prompt.md 3-15) ==="
+input bool   InpUseEMA9                   = true;      // short-term micro-momentum (entry timing evidence, NOT a hard gate)
+input int    InpEMA9Period                = 9;
+input bool   InpUseEMA200                 = true;      // major-trend regime context
+input int    InpEMA200Period              = 200;
+input bool   InpUseMACD                   = true;      // proper native MACD momentum evidence
+input int    InpMACDFast                  = 12;
+input int    InpMACDSlow                  = 26;
+input int    InpMACDSignal                = 9;
+input bool   InpUseConfidenceEngine       = true;      // 0-100 weighted confidence replaces raw filter score in Auto mode
+input double InpMinConfidenceScore        = 75.0;      // base minimum normalized confidence
+input double InpMinDirectionalConfidenceGap = 5.0;     // |long-short| required when both sides exceed threshold
+input bool   InpNormalizeMissingExternalData = true;   // unavailable categories lose weight from possible (fail-open)
+input bool   InpUseAdaptiveConfidenceThreshold = true; // threshold varies by environment
+input double InpConfidenceHighVol         = 80.0;
+input double InpConfidenceSideways        = 82.0;
+input double InpConfidenceLowLiquidity    = 100.0;     // LOW_LIQUIDITY blocks regardless of score
+input double InpConfidenceExtremeVol      = 100.0;     // EXTREME_VOLATILITY blocks regardless of score
+//--- confidence category weights (normalized internally if sum != 100, section 42)
+input double InpWeightPriceAction         = 20.0;
+input double InpWeightTrend               = 15.0;
+input double InpWeightVolumeLiquidity     = 15.0;
+input double InpWeightMomentum            = 10.0;
+input double InpWeightVWAP                = 10.0;
+input double InpWeightVolatility          = 10.0;
+input double InpWeightMacro               = 10.0;
+input double InpWeightOptions             = 5.0;
+input double InpWeightRiskReward          = 5.0;
+//--- volume state thresholds (section 7; percentiles)
+input double InpVolumeLowPct              = 25.0;
+input double InpVolumeElevatedPct         = 65.0;
+input double InpVolumeSpikePct            = 85.0;
+input double InpVolumeExtremePct          = 97.0;
+//--- environment extremes (section 44/45)
+input double InpExtremeATRPercentile      = 97.0;
+input double InpExtremeVolumePercentile   = 97.0;
+input double InpExtremeDisplacementATR    = 2.8;
+input int    InpLowLiquidityConfirmBars   = 2;         // persistence required for LOW_LIQUIDITY
+//--- setup-specific minimum NET R:R (section 16; NO universal 1:3)
+input double InpMinNetRR_EMAPullback      = 1.20;
+input double InpMinNetRR_VWAPReversion    = 1.00;
+input double InpMinNetRR_LondonBreakout   = 1.50;
+input double InpMinNetRR_NYMomentum       = 1.50;
+input double InpMinNetRR_ComplexMode      = 1.20;
+//--- optional Gold Options/OI context: architecture only, FAIL-OPEN (sections 25/26/48)
+input bool   InpUseOptionsContext         = false;
+input bool   InpRequireOptionsData        = false;
+input int    InpOptionsMaxAgeSec          = 900;
 input int    InpRSIOverbought             = 78;
 input int    InpRSIOversold               = 22;
 input ENUM_VWAP_ANCHOR InpVWAPAnchor      = VWAP_BROKER_DAY;
@@ -1569,6 +1662,7 @@ string eaSymbol="";
 int hATR=INVALID_HANDLE,hADX=INVALID_HANDLE,hEMA20=INVALID_HANDLE,hEMA50=INVALID_HANDLE;
 int hH1EMA20=INVALID_HANDLE,hH1EMA50=INVALID_HANDLE,hM15EMA20=INVALID_HANDLE,hM15EMA50=INVALID_HANDLE;
 int hRSI=INVALID_HANDLE,hM5E20=INVALID_HANDLE,hM5E50=INVALID_HANDLE,hM5ADX=INVALID_HANDLE;
+int hEMA9=INVALID_HANDLE,hEMA200=INVALID_HANDLE,hMACD=INVALID_HANDLE;   // [SIGNAL QUALITY]
 
 double g_atr=0,g_adx=0,g_adxPlus=0,g_adxMinus=0,g_rsi=0;
 double g_ema20=0,g_ema50=0,g_h1e20=0,g_h1e50=0,g_m15e20=0,g_m15e50=0;
@@ -1685,7 +1779,7 @@ color C_SYD_DIM=C'20,60,90',C_TOK_DIM=C'50,32,90',C_LON_DIM=C'90,54,0',C_NY_DIM=
 #define L_SECTIONS 3
 #define L_ROWS     16
 #define R_SECTIONS 4
-#define R_ROWS     28      // 22 legacy + 2 SR rows [SR] + 4 capital-engine rows
+#define R_ROWS     32      // 22 legacy + 2 SR [SR] + 4 capital-engine + 4 signal-quality rows
 int g_font=7,g_fontPx=9,g_dpi=96;
 double g_dpiScale=1.0;
 int g_rh=16,g_hdrH=30,g_colW=300,g_pad=12,g_gap=14,g_panelW=0;
@@ -2435,6 +2529,18 @@ void UpdateIndicators()
    Copy1(hH1EMA20,0,1,g_h1e20);Copy1(hH1EMA50,0,1,g_h1e50);
    Copy1(hM15EMA20,0,1,g_m15e20);Copy1(hM15EMA50,0,1,g_m15e50);
    Copy1(hRSI,0,1,g_rsi);
+   //--- [SIGNAL QUALITY] EMA9 / EMA200 / MACD (sections 4/5/6)
+   if(hEMA9!=INVALID_HANDLE)Copy1(hEMA9,0,1,g_ema9);
+   if(hEMA200!=INVALID_HANDLE)Copy1(hEMA200,0,1,g_ema200);
+   if(hMACD!=INVALID_HANDLE)
+   {
+      double m=0,sg=0;
+      if(Copy1(hMACD,0,1,m)&&Copy1(hMACD,1,1,sg))
+      {
+         g_macdHistPrev=g_macdHist;      // previous close-bar histogram (increasing/decreasing evidence)
+         g_macdMain=m;g_macdSignal=sg;g_macdHist=m-sg;
+      }
+   }
 }
 
 double VolumeRatio(int shift=1)
@@ -2681,6 +2787,697 @@ void EvaluateScalpSignal()
    }
 }
 
+//====================================================================
+// [SIGNAL QUALITY] structure classifier + volume states + regimes +
+// confidence engine + centralized decision (prompt.md sections 3-15).
+// Additive layer: classifies and scores; never bypasses existing gates.
+//====================================================================
+//--- 3. explicit HH/HL/LH/LL from confirmed (closed-bar) swings
+ENUM_STRUCTURE_STATE g_structureState=STRUCTURE_UNKNOWN;
+double g_lastSwingHigh=0,g_prevSwingHigh=0,g_lastSwingLow=0,g_prevSwingLow=0;
+double g_structureBullStrength=0,g_structureBearStrength=0;
+datetime g_lastStructureEval=0;
+//--- 7. volume distribution ring (reuses PercentileRank architecture)
+#define VOLUME_SAMPLES 256
+double g_volBuf[VOLUME_SAMPLES]; int g_volCnt=0,g_volIdx=0;
+ENUM_VOLUME_STATE g_volumeState=VOLUME_NORMAL;
+double g_volumePercentile=50.0;
+//--- 8. regime caches (recomputed on new M1 bar; cheap reads elsewhere)
+ENUM_DIRECTION_REGIME g_dirRegime=REGIME_SIDEWAYS;
+ENUM_ENVIRONMENT_REGIME g_envRegime=ENV_NORMAL;
+int g_lowLiqBars=0;                    // persistence counter for LOW_LIQUIDITY
+//--- 6. MACD cache
+double g_macdMain=0,g_macdSignal=0,g_macdHist=0,g_macdHistPrev=0;
+//--- 4/5. new EMA cache
+double g_ema9=0,g_ema200=0;
+//--- 9. confidence breakdowns (computed per candidate, not per tick)
+struct ConfidenceBreakdown
+{
+   double priceAction;
+   double trend;
+   double volumeLiquidity;
+   double momentum;
+   double vwapLocation;
+   double volatility;
+   double macro;
+   double options;
+   double riskReward;
+   double rawScore;
+   double possibleScore;
+   double normalizedScore;
+};
+//--- 13. central SignalDecision telemetry structure (additive; never replaces state structs)
+struct SignalDecision
+{
+   string instrument;
+   ENUM_SIGNAL_DECISION decision;
+   int direction;
+   double entry,stopLoss,tp1,tp2,tp3;
+   double quantity;
+   double riskMoney,riskPct;
+   double potentialRewardMoney,netPotentialRewardMoney,riskReward;
+   double confidence,oppositeConfidence,confidenceGap;
+   ENUM_STRUCTURE_STATE structure;
+   ENUM_DIRECTION_REGIME directionRegime;
+   ENUM_ENVIRONMENT_REGIME environmentRegime;
+   ENUM_VOLUME_STATE volumeState;
+   ENUM_WINDOW_ID window;
+   bool highVolatility;
+   double spreadPoints,spreadPercentile,spreadToATR,expectedSlippage,expectedCost;
+   ConfidenceBreakdown confidenceBreakdown;
+   string setupName,signalReasons,gateReason;
+};
+SignalDecision g_lastDecision;         // authoritative last candidate telemetry (dashboard/CSV)
+//--- 25/27. options architecture: bounded, no fetch per tick, fail-open by default
+struct OptionStrikeLevel
+{
+   double strike;
+   double callOI;
+   double putOI;
+   double callVolume;
+   double putVolume;
+};
+#define OPTION_STRIKE_MAX 64
+struct GoldOptionsSnapshot
+{
+   bool available;
+   datetime timestamp;
+   double callOI,putOI,callOIChange,putOIChange;
+   double pcr;
+   double impliedVolatility,ivPercentile;
+   double callVolume,putVolume;
+   double nearestCallWall,nearestPutWall,callWallOI,putWallOI;
+   double gammaWall;
+   bool gammaAvailable;
+   string source;
+};
+GoldOptionsSnapshot g_options;
+OptionStrikeLevel g_optionStrikes[OPTION_STRIKE_MAX];
+int g_optionStrikeCount=0;
+//--- 35. confidence performance buckets (bounded, telemetry only)
+struct ConfBucketStats { int trades,wins,losses; double netR,rSum; };
+ConfBucketStats g_confBuckets[5];      // 70-74,75-79,80-84,85-89,90+
+//--- 36. performance by setup (bounded ids 0..5: EB,VR,LDN,NY,COMPLEX,RCV)
+ConfBucketStats g_setupStats[6];
+//--- 37. regime counters (direction x5, env accepted x2, env rejects x3)
+int g_regimeTrades[5];
+int g_envTrades[5];                    // index = ENUM_ENVIRONMENT_REGIME (accepted entries)
+int g_envRejects[5];
+//--- weight cache (normalized at init; section 42)
+double g_wPrice=20,g_wTrend=15,g_wVolume=15,g_wMomentum=10,g_wVWAP=10,g_wVol=10,g_wMacro=10,g_wOptions=5,g_wRR=5;
+double g_weightSum=100;
+string g_confTelemetry="";             // CONFIDENCE_WEIGHTS_NORMALIZED etc.
+
+//--- 42. normalize configured weights; disable engine safely on degenerate config
+void InitConfidenceWeights()
+{
+   g_wPrice=InpWeightPriceAction;g_wTrend=InpWeightTrend;g_wVolume=InpWeightVolumeLiquidity;
+   g_wMomentum=InpWeightMomentum;g_wVWAP=InpWeightVWAP;g_wVol=InpWeightVolatility;
+   g_wMacro=InpWeightMacro;g_wOptions=InpWeightOptions;g_wRR=InpWeightRiskReward;
+   g_weightSum=g_wPrice+g_wTrend+g_wVolume+g_wMomentum+g_wVWAP+g_wVol+g_wMacro+g_wOptions+g_wRR;
+   if(g_weightSum<=0)
+   {
+      g_confTelemetry="CONFIDENCE_ENGINE_DISABLED_WEIGHTS_ZERO";
+      return;
+   }
+   if(MathAbs(g_weightSum-100.0)>0.001)
+   {
+      double k=100.0/g_weightSum;
+      g_wPrice*=k;g_wTrend*=k;g_wVolume*=k;g_wMomentum*=k;g_wVWAP*=k;g_wVol*=k;g_wMacro*=k;g_wOptions*=k;g_wRR*=k;
+      g_weightSum=100.0;
+      g_confTelemetry="CONFIDENCE_WEIGHTS_NORMALIZED";
+      Print("CONFIDENCE_WEIGHTS_NORMALIZED: configured weights sum ",DoubleToString(InpWeightPriceAction+InpWeightTrend+InpWeightVolumeLiquidity+InpWeightMomentum+InpWeightVWAP+InpWeightVolatility+InpWeightMacro+InpWeightOptions+InpWeightRiskReward,2)," -> normalized to 100");
+   }
+}
+
+//--- 3. structure classification: confirmed swings from DetectSMC's prior Hi/Lo windows,
+//--- refined with the last two completed swing extremes. Runs on NEW M1 bar only.
+void UpdateStructureState()
+{
+   MqlRates r[];ArraySetAsSeries(r,true);
+   int n=MathMax(InpSwingLookback*3,90);
+   if(CopyRates(eaSymbol,PERIOD_M1,1,n,r)<n)return;
+   //--- detect confirmed swing highs/lows with a 2-bar fractal (closed bars only)
+   double swH[];double swL[];datetime swHT[];datetime swLT[];
+   ArrayResize(swH,0);ArrayResize(swL,0);ArrayResize(swHT,0);ArrayResize(swLT,0);
+   for(int i=2;i<n-2;i++)
+   {
+      // series arrays: index i is older than i-1
+      if(r[i].high>r[i+1].high&&r[i].high>r[i+2].high&&r[i].high>=r[i-1].high&&r[i].high>=r[i-2].high)
+      {
+         int cnt=ArraySize(swH);ArrayResize(swH,cnt+1);ArrayResize(swHT,cnt+1);
+         swH[cnt]=r[i].high;swHT[cnt]=r[i].time;
+      }
+      if(r[i].low<r[i+1].low&&r[i].low<r[i+2].low&&r[i].low<=r[i-1].low&&r[i].low<=r[i-2].low)
+      {
+         int cnt=ArraySize(swL);ArrayResize(swL,cnt+1);ArrayResize(swLT,cnt+1);
+         swL[cnt]=r[i].low;swLT[cnt]=r[i].time;
+      }
+   }
+   int nh=ArraySize(swH),nl=ArraySize(swL);
+   if(nh<2||nl<2)return;
+   //--- series arrays are oldest-first; take the two most recent of each
+   g_lastSwingHigh=swH[nh-1];g_prevSwingHigh=swH[nh-2];
+   g_lastSwingLow=swL[nl-1];g_prevSwingLow=swL[nl-2];
+   bool hh=(g_lastSwingHigh>g_prevSwingHigh),hl=(g_lastSwingLow>g_prevSwingLow);
+   bool lh=(g_lastSwingHigh<g_prevSwingHigh),ll=(g_lastSwingLow<g_prevSwingLow);
+   //--- progression strength: fraction of the last N swings agreeing directionally
+   double bullPts=0,bearPts=0,rangePts=0;int pairs=MathMin(4,MathMin(nh,nl)-1);
+   for(int k=0;k<pairs;k++)
+   {
+      bool hUp=swH[nh-1-k]>swH[nh-2-k],lUp=swL[nl-1-k]>swL[nl-2-k];
+      if(hUp&&lUp)bullPts+=1.0;
+      else if(!hUp&&!lUp)bearPts+=1.0;
+      else rangePts+=1.0;
+   }
+   double den=MathMax(1,pairs);
+   g_structureBullStrength=bullPts/den*100.0;
+   g_structureBearStrength=bearPts/den*100.0;
+   //--- transitions use the existing confirmed CHOCH/BOS evidence
+   ENUM_STRUCTURE_STATE st=STRUCTURE_UNKNOWN;
+   if(hh&&hl)st=STRUCTURE_HH_HL;
+   else if(lh&&ll)st=STRUCTURE_LH_LL;
+   else if(hh||hl)
+   {
+      if(g_chochUp||g_bosUp)st=STRUCTURE_TRANSITION_BULL;
+      else st=STRUCTURE_RANGE;
+   }
+   else if(lh||ll)
+   {
+      if(g_chochDn||g_bosDn)st=STRUCTURE_TRANSITION_BEAR;
+      else st=STRUCTURE_RANGE;
+   }
+   else st=STRUCTURE_RANGE;
+   //--- cross-check: a bullish CHOCH/BOS out of a bearish/range structure = transition bull
+   if((g_chochUp||g_bosUp)&&(st==STRUCTURE_RANGE||st==STRUCTURE_LH_LL))st=STRUCTURE_TRANSITION_BULL;
+   if((g_chochDn||g_bosDn)&&(st==STRUCTURE_RANGE||st==STRUCTURE_HH_HL))st=STRUCTURE_TRANSITION_BEAR;
+   g_structureState=st;
+   g_lastStructureEval=ServerNow();
+}
+
+//--- 7. volume percentile + state classification (per closed M1 bar)
+void UpdateVolumeEngine()
+{
+   MqlRates r[];ArraySetAsSeries(r,true);
+   if(!CopyRates(eaSymbol,PERIOD_M1,1,1,r))return;
+   double v=(double)r[0].tick_volume;
+   if(v<=0)return;
+   // maintain rolling distribution of relative volume (volRatio of each closed bar)
+   double ratio=VolumeRatio(1);
+   if(ratio<=0)return;
+   g_volBuf[g_volIdx]=ratio;g_volIdx=(g_volIdx+1)%VOLUME_SAMPLES;if(g_volCnt<VOLUME_SAMPLES)g_volCnt++;
+   g_volumePercentile=PercentileRank(g_volBuf,g_volCnt,ratio);
+   double p=g_volumePercentile;
+   if(p<InpVolumeLowPct)g_volumeState=VOLUME_LOW;
+   else if(p<InpVolumeElevatedPct)g_volumeState=VOLUME_NORMAL;
+   else if(p<InpVolumeSpikePct)g_volumeState=VOLUME_ELEVATED;
+   else if(p<InpVolumeExtremePct)g_volumeState=VOLUME_SPIKE;
+   else g_volumeState=VOLUME_EXTREME;
+}
+
+string VolumeStateName(ENUM_VOLUME_STATE v)
+{
+   switch(v)
+   {
+      case VOLUME_LOW:return "LOW";
+      case VOLUME_NORMAL:return "NORMAL";
+      case VOLUME_ELEVATED:return "ELEVATED";
+      case VOLUME_SPIKE:return "SPIKE";
+      case VOLUME_EXTREME:return "EXTREME";
+   }
+   return "?";
+}
+
+string StructureStateName(ENUM_STRUCTURE_STATE st)
+{
+   switch(st)
+   {
+      case STRUCTURE_HH_HL:return "HH-HL";
+      case STRUCTURE_LH_LL:return "LH-LL";
+      case STRUCTURE_TRANSITION_BULL:return "TRANS-BULL";
+      case STRUCTURE_TRANSITION_BEAR:return "TRANS-BEAR";
+      case STRUCTURE_RANGE:return "RANGE";
+      case STRUCTURE_UNKNOWN:return "UNKNOWN";
+   }
+   return "?";
+}
+
+string DirectionRegimeName(ENUM_DIRECTION_REGIME r)
+{
+   switch(r)
+   {
+      case REGIME_STRONG_BULLISH:return "STRONG BULL";
+      case REGIME_BULLISH:return "BULLISH";
+      case REGIME_SIDEWAYS:return "SIDEWAYS";
+      case REGIME_BEARISH:return "BEARISH";
+      case REGIME_STRONG_BEARISH:return "STRONG BEAR";
+   }
+   return "?";
+}
+
+string EnvironmentRegimeName(ENUM_ENVIRONMENT_REGIME e)
+{
+   switch(e)
+   {
+      case ENV_NORMAL:return "NORMAL";
+      case ENV_HIGH_VOLATILITY:return "HIGH VOL";
+      case ENV_EXTREME_VOLATILITY:return "EXTREME VOL";
+      case ENV_LOW_LIQUIDITY:return "LOW LIQ";
+      case ENV_DISORDER:return "DISORDER";
+   }
+   return "?";
+}
+
+//--- 8B. environment regime: independent volatility/liquidity/disorder dimension.
+//--- Reuses existing ATR/spread/volume/disorder infrastructure - no duplicate stats.
+void UpdateEnvironmentRegime()
+{
+   double atrp=ATRPercentile();
+   double disp=CandleDisplacementATR();
+   double vpp=g_volumePercentile;
+   //--- DISORDER first (existing microstructure logic owns this classification)
+   if(IsDisorder()){g_envRegime=ENV_DISORDER;g_lowLiqBars=0;return;}
+   //--- EXTREME volatility: multiple conditions must coincide (section 44: never one mild indicator)
+   int extremeVotes=0;
+   if(atrp>=InpExtremeATRPercentile)extremeVotes++;
+   if(vpp>=InpExtremeVolumePercentile)extremeVotes++;
+   if(disp>=InpExtremeDisplacementATR)extremeVotes++;
+   if(SpreadPercentile()>=InpDisorderSpreadPct)extremeVotes++;
+   if(extremeVotes>=2){g_envRegime=ENV_EXTREME_VOLATILITY;g_lowLiqBars=0;return;}
+   //--- LOW liquidity: multi-condition + persistence (section 45)
+   bool lowVol=(g_volRatio<InpMinLiquidityLevel&&vpp<InpVolumeLowPct);
+   bool wideSpread=(SpreadPercentile()>=InpMaxSpreadPercentile);
+   if(lowVol||wideSpread)g_lowLiqBars++;else g_lowLiqBars=0;
+   if(g_lowLiqBars>=InpLowLiquidityConfirmBars){g_envRegime=ENV_LOW_LIQUIDITY;return;}
+   //--- HIGH volatility: existing HV engine drives this classification
+   int hs=HVScore(g_dirBias>=0?1:-1);
+   if(InpHighVolatilityMode!=HV_OFF&&hs>=InpHVMinScore){g_envRegime=ENV_HIGH_VOLATILITY;return;}
+   g_envRegime=ENV_NORMAL;
+}
+
+//--- 8A. direction regime: weighted directional evidence score (internal -50..+50 scale)
+int DirectionRegimeScore()
+{
+   int sc=0;
+   double c=iClose(eaSymbol,PERIOD_M1,1);
+   //--- structure (HH/HL vs LH/LL): up to +/-12
+   if(g_structureState==STRUCTURE_HH_HL)sc+=12;
+   else if(g_structureState==STRUCTURE_LH_LL)sc-=12;
+   else if(g_structureState==STRUCTURE_TRANSITION_BULL)sc+=8;
+   else if(g_structureState==STRUCTURE_TRANSITION_BEAR)sc-=8;
+   //--- BOS/CHOCH (related to structure; small additional weight)
+   if(g_bosUp)sc+=4;if(g_bosDn)sc-=4;
+   if(g_chochUp)sc+=3;if(g_chochDn)sc-=3;
+   //--- EMA stack on M1: 9>20>50 vs 9<20<50 (+/-6), partial stacks +/-3
+   if(g_ema9>g_ema20&&g_ema20>g_ema50)sc+=6;
+   else if(g_ema9<g_ema20&&g_ema20<g_ema50)sc-=6;
+   else if(g_ema20>g_ema50)sc+=3;else if(g_ema20<g_ema50)sc-=3;
+   //--- EMA200 major bias +/-4
+   if(g_ema200>0&&c>g_ema200)sc+=4;else if(g_ema200>0&&c<g_ema200)sc-=4;
+   //--- M5 trend +/-3, H1/M15 trend +/-3
+   if(g_m5e20>g_m5e50)sc+=3;else if(g_m5e20<g_m5e50)sc-=3;
+   if(g_h1e20>g_h1e50&&g_m15e20>g_m15e50)sc+=3;
+   else if(g_h1e20<g_h1e50&&g_m15e20<g_m15e50)sc-=3;
+   //--- VWAP +/-2 (location, capped - trend evidence already weighted)
+   if(g_vwap>0){if(c>g_vwap)sc+=2;else sc-=2;}
+   //--- ADX/DI +/-3
+   if(g_adx>=InpMinADX){if(g_adxPlus>g_adxMinus)sc+=3;else if(g_adxMinus>g_adxPlus)sc-=3;}
+   //--- SuperTrend +/-3
+   if(g_superTrendDir>0)sc+=3;else if(g_superTrendDir<0)sc-=3;
+   //--- macro as SMALL contextual input +/-2
+   sc+=(int)MathMax(-2,MathMin(2,(g_macroBull-g_macroBear)));
+   return sc;
+}
+
+ENUM_DIRECTION_REGIME UpdateDirectionRegime()
+{
+   int sc=DirectionRegimeScore();
+   ENUM_DIRECTION_REGIME r;
+   if(sc>=20)r=REGIME_STRONG_BULLISH;
+   else if(sc>=8)r=REGIME_BULLISH;
+   else if(sc<=-20)r=REGIME_STRONG_BEARISH;
+   else if(sc<=-8)r=REGIME_BEARISH;
+   else r=REGIME_SIDEWAYS;
+   g_dirRegime=r;
+   return r;
+}
+
+//--- 28. environment risk multiplier REQUEST (no second sizing engine; HV NOT doubled:
+//--- the existing InpHVExtraSignalRiskMult already applies in GetEffectiveTradeRiskPct).
+double RegimeRiskMultiplier()
+{
+   switch(g_envRegime)
+   {
+      case ENV_EXTREME_VOLATILITY:return 0.0;    // block
+      case ENV_LOW_LIQUIDITY:return 0.0;         // block
+      case ENV_DISORDER:return 0.0;              // block
+      case ENV_HIGH_VOLATILITY:return 1.0;       // existing HV multiplier already applied once
+      case ENV_NORMAL:break;
+   }
+   //--- direction dimension: SIDEWAYS = reduced risk request
+   if(g_dirRegime==REGIME_SIDEWAYS)return 0.60;
+   return 1.00;
+}
+
+//--- 11. effective confidence threshold by environment
+double EffectiveConfidenceThreshold()
+{
+   if(!InpUseAdaptiveConfidenceThreshold)return InpMinConfidenceScore;
+   switch(g_envRegime)
+   {
+      case ENV_HIGH_VOLATILITY:return InpConfidenceHighVol;
+      case ENV_EXTREME_VOLATILITY:return InpConfidenceExtremeVol;   // blocks anyway
+      case ENV_LOW_LIQUIDITY:return InpConfidenceLowLiquidity;      // blocks anyway
+      case ENV_DISORDER:return 100.0;                               // blocks anyway
+      case ENV_NORMAL:break;
+   }
+   if(g_dirRegime==REGIME_SIDEWAYS)return InpConfidenceSideways;
+   return InpMinConfidenceScore;
+}
+
+//--- 25/48. options snapshot accessor: architecture + fail-open policy.
+//--- No network fetch here by default; a future provider (e.g. an FMP endpoint if it
+//--- ever proves reliable) fills g_options. Stale data is never used.
+bool OptionsDataUsable()
+{
+   if(!InpUseOptionsContext)return false;
+   if(!g_options.available)return false;
+   if(g_options.timestamp<=0)return false;
+   return (ServerNow()-g_options.timestamp)<=InpOptionsMaxAgeSec;
+}
+
+//--- 26. options directional score 0..1 (contextual, never Theta/Vega directional)
+double OptionsScore(int dir)
+{
+   if(!OptionsDataUsable())return 0;
+   double sc=0;
+   //--- PCR context (mild)
+   if(g_options.pcr>0)
+   {
+      if(dir<0&&g_options.pcr>1.0)sc+=0.3;         // heavy puts = bearish context
+      else if(dir>0&&g_options.pcr<0.8)sc+=0.3;    // light puts = bullish context
+   }
+   //--- OI change agreement
+   if(dir>0&&g_options.callOIChange>0)sc+=0.3;
+   if(dir<0&&g_options.putOIChange>0)sc+=0.3;
+   //--- walls as S/R context
+   if(dir>0&&g_options.nearestCallWall>0&&g_options.nearestCallWall>iClose(eaSymbol,PERIOD_M1,1))sc+=0.2;   // resistance overhead
+   if(dir<0&&g_options.nearestPutWall>0&&g_options.nearestPutWall<iClose(eaSymbol,PERIOD_M1,1))sc+=0.2;     // support below
+   return MathMin(1.0,sc);
+}
+
+//--- 9/10. confidence computation for ONE direction. reasonBuf accumulates evidence tags
+//--- (bounded; only called for real candidates, never per tick).
+double ComputeConfidence(int dir,ConfidenceBreakdown &out,string &reasonBuf,bool buildReasons)
+{
+   double price=0,trend=0,volu=0,mom=0,vwapS=0,volat=0,macro=0,opts=0,rr=0;
+   double c=iClose(eaSymbol,PERIOD_M1,1);
+   bool bullish=(dir>0);
+   //================= PRICE ACTION / SMC (max 20) =================
+   {
+      //--- structure alignment up to 5
+      if(g_structureState==STRUCTURE_HH_HL){if(bullish)price+=5;else reasonBuf+="[opp]HH_HL ";}
+      else if(g_structureState==STRUCTURE_LH_LL){if(!bullish)price+=5;else reasonBuf+="[opp]LH_LL ";}
+      else if(g_structureState==STRUCTURE_TRANSITION_BULL){if(bullish){price+=3;reasonBuf+="TRANS_BULL ";}}
+      else if(g_structureState==STRUCTURE_TRANSITION_BEAR){if(!bullish){price+=3;reasonBuf+="TRANS_BEAR ";}}
+      else if(g_structureState==STRUCTURE_RANGE&&buildReasons)reasonBuf+="RANGE ";
+      //--- BOS/CHOCH up to 5
+      if(bullish&&g_bosUp){price+=3;reasonBuf+="BULLISH_BOS ";}
+      if(!bullish&&g_bosDn){price+=3;reasonBuf+="BEARISH_BOS ";}
+      if(bullish&&g_chochUp){price+=2;reasonBuf+="BULLISH_CHOCH ";}
+      if(!bullish&&g_chochDn){price+=2;reasonBuf+="BEARISH_CHOCH ";}
+      //--- liquidity sweep up to 3
+      if(bullish&&g_sweepDn){price+=3;reasonBuf+="LIQUIDITY_SWEEP_LOW ";}
+      if(!bullish&&g_sweepUp){price+=3;reasonBuf+="LIQUIDITY_SWEEP_HIGH ";}
+      //--- FVG/IFVG/PTB up to 4
+      if(bullish&&g_fvg&&g_fvgDir>0){price+=1.5;reasonBuf+="FVG_BULL ";}
+      if(!bullish&&g_fvg&&g_fvgDir<0){price+=1.5;reasonBuf+="FVG_BEAR ";}
+      if(bullish&&g_ifvg&&g_ifvgDir>0){price+=1.5;reasonBuf+="IFVG_BULL ";}
+      if(!bullish&&g_ifvg&&g_ifvgDir<0){price+=1.5;reasonBuf+="IFVG_BEAR ";}
+      if(bullish&&g_ptb&&g_ptbDir>0){price+=1.0;reasonBuf+="PTB_BULL ";}
+      if(!bullish&&g_ptb&&g_ptbDir<0){price+=1.0;reasonBuf+="PTB_BEAR ";}
+      //--- S/R structural support up to 3 (SR vote)
+      double srV=SR_DirectionalVote(dir,(dir>0?Ask():Bid()),g_atr);
+      if(srV>0){price+=MathMin(3.0,srV*3.0);reasonBuf+="SR_SUPPORT ";}
+   }
+   //================= TREND / MTF (max 15) =================
+   {
+      //--- EMA9/20 up to 3
+      if(g_ema9>0&&g_ema20>0)
+      {
+         if(bullish&&g_ema9>g_ema20){trend+=3;reasonBuf+="EMA9>EMA20 ";}
+         if(!bullish&&g_ema9<g_ema20){trend+=3;reasonBuf+="EMA9<EMA20 ";}
+      }
+      //--- EMA20/50 up to 3 (full stack bonus already partially covered; avoid double-count:
+      //--- award full only when 9/20 disagreed, else partial)
+      if(bullish&&g_ema20>g_ema50){trend+=(trend>=3?1.5:3);if(trend>=3)reasonBuf+="EMA20>EMA50 ";}
+      if(!bullish&&g_ema20<g_ema50){trend+=(trend>=3?1.5:3);if(trend>=3)reasonBuf+="EMA20<EMA50 ";}
+      //--- EMA200 bias up to 3 (context: partial credit on counter-trend reversion handled by setup)
+      if(g_ema200>0)
+      {
+         if(bullish&&c>g_ema200){trend+=3;reasonBuf+="ABOVE_EMA200 ";}
+         if(!bullish&&c<g_ema200){trend+=3;reasonBuf+="BELOW_EMA200 ";}
+      }
+      //--- M5 trend up to 3
+      if(bullish&&g_m5e20>g_m5e50){trend+=3;reasonBuf+="M5_TREND_UP ";}
+      if(!bullish&&g_m5e20<g_m5e50){trend+=3;reasonBuf+="M5_TREND_DN ";}
+      //--- M15/H1 trend up to 3
+      bool hBull=(g_h1e20>g_h1e50&&g_m15e20>g_m15e50),hBear=(g_h1e20<g_h1e50&&g_m15e20<g_m15e50);
+      if(bullish&&hBull){trend+=3;reasonBuf+="H1_M15_UP ";}
+      if(!bullish&&hBear){trend+=3;reasonBuf+="H1_M15_DN ";}
+      trend=MathMin(trend,15.0);
+   }
+   //================= VOLUME / LIQUIDITY (max 15) =================
+   {
+      //--- relative volume up to 5
+      if(g_volRatio>=InpMinVolumeRatio){volu+=5;reasonBuf+="VOL_RATIO_OK ";}
+      else if(g_volRatio>=1.0)volu+=2.5;
+      //--- volume percentile up to 4
+      if(g_volumePercentile>=InpVolumeElevatedPct)volu+=4;
+      else if(g_volumePercentile>=InpVolumeLowPct)volu+=2;
+      //--- directional spike up to 3: spike counts ONLY with directional candle + structure agreement
+      double disp=CandleDisplacementATR();
+      bool dirCandle=(bullish?(iClose(eaSymbol,PERIOD_M1,1)>iOpen(eaSymbol,PERIOD_M1,1)):(iClose(eaSymbol,PERIOD_M1,1)<iOpen(eaSymbol,PERIOD_M1,1)));
+      if(g_volumeState==VOLUME_SPIKE&&dirCandle&&(bullish?(g_structureBullStrength>=g_structureBearStrength):(g_structureBearStrength>=g_structureBullStrength)))
+      {volu+=3;reasonBuf+="VOLUME_SPIKE_CONFIRMED ";}
+      //--- liquidity quality up to 3
+      if(g_volRatio>=InpMinLiquidityLevel){volu+=3;reasonBuf+="LIQUIDITY_OK ";}
+      volu=MathMin(volu,15.0);
+   }
+   //================= MOMENTUM (max 10) =================
+   {
+      //--- RSI directional state up to 3
+      if(bullish&&g_rsi>=52&&g_rsi<InpRSIOverbought){mom+=3;reasonBuf+="RSI_BULLISH ";}
+      if(!bullish&&g_rsi<=48&&g_rsi>InpRSIOversold){mom+=3;reasonBuf+="RSI_BEARISH ";}
+      //--- MACD up to 4 (proper native MACD)
+      if(InpUseMACD&&g_macdHist!=0)
+      {
+         if(bullish&&g_macdMain>g_macdSignal&&g_macdHist>0){mom+=3;reasonBuf+="MACD_BULLISH ";}
+         if(!bullish&&g_macdMain<g_macdSignal&&g_macdHist<0){mom+=3;reasonBuf+="MACD_BEARISH ";}
+         if(bullish&&g_macdHist>g_macdHistPrev)mom+=1;    // hist increasing
+         if(!bullish&&g_macdHist<g_macdHistPrev)mom+=1;   // hist decreasing
+      }
+      //--- ADX/DI or displacement up to 3
+      if(g_adx>=InpMinADX){if(bullish&&g_adxPlus>g_adxMinus){mom+=3;reasonBuf+="DI_BULL ";}
+                           if(!bullish&&g_adxMinus>g_adxPlus){mom+=3;reasonBuf+="DI_BEAR ";}}
+      else if(disp>=0.5){mom+=1.5;}   // displacement as weaker substitute
+      mom=MathMin(mom,10.0);
+   }
+   //================= VWAP / LOCATION (max 10; setup-aware) =================
+   {
+      string why=g_scalpWhy;
+      bool reversion=(StringFind(why,"reversion")>=0);
+      if(g_vwap>0)
+      {
+         double dev=(c-g_vwap)/g_atr;
+         if(!reversion)
+         {
+            //--- trend setups: same side of VWAP supports
+            if(bullish&&c>g_vwap){vwapS+=6;reasonBuf+="VWAP_SUPPORT ";}
+            if(!bullish&&c<g_vwap){vwapS+=6;reasonBuf+="VWAP_RESIST ";}
+            //--- modest deviation fine; huge adverse deviation costs
+            if(bullish&&dev<-1.5)vwapS=0;
+            if(!bullish&&dev>1.5)vwapS=0;
+         }
+         else
+         {
+            //--- reversion: extreme deviation + recross supports OPPOSITE-direction entry
+            if(bullish&&dev<=-1.2){vwapS+=8;reasonBuf+="VWAP_DEV_LOW ";}
+            if(!bullish&&dev>=1.2){vwapS+=8;reasonBuf+="VWAP_DEV_HIGH ";}
+         }
+      }
+      //--- Bollinger recross where appropriate (reversion): existing bb values reused
+      if(reversion)
+      {
+         if(bullish&&c>g_bbMid){vwapS+=2;reasonBuf+="BB_RECOVER ";}
+         if(!bullish&&c<g_bbMid){vwapS+=2;reasonBuf+="BB_REJECT ";}
+      }
+      vwapS=MathMin(vwapS,10.0);
+   }
+   //================= VOLATILITY / ENVIRONMENT (max 10) =================
+   {
+      double atrp=ATRPercentile();
+      if(g_envRegime==ENV_NORMAL)
+      {
+         //--- favorable band: ATR percentile 30-85 good
+         if(atrp>=30&&atrp<=85)volat+=8;else volat+=4;
+         if(g_volumeState!=VOLUME_LOW)volat+=2;
+         reasonBuf+="ENV_NORMAL ";
+      }
+      else if(g_envRegime==ENV_HIGH_VOLATILITY){volat+=4;reasonBuf+="ENV_HIGH_VOL ";}
+      //--- EXTREME/LOW_LIQ/DISORDER: environment gate blocks; contribute 0
+   }
+   //================= MACRO / INTERMARKET (max 10) =================
+   {
+      if(AvailableMacroCount()>0)
+      {
+         int mv=MacroVotes(dir),ov=MacroVotes(-dir);
+         if(mv>ov){macro+=10;reasonBuf+="MACRO_SUPPORTIVE ";}
+         else if(mv==ov)macro+=4;   // neutral
+         //--- opposing macro contributes 0 (never negative per section 18)
+      }
+      //--- unavailable: possibleScore loses this weight (renormalization below)
+   }
+   //================= OPTIONS (max 5; fail-open) =================
+   {
+      if(OptionsDataUsable())
+      {
+         opts=OptionsScore(dir)*5.0;
+         if(opts>0&&buildReasons)reasonBuf+="OPTIONS_CONTEXT ";
+      }
+      //--- unavailable/stale: weight removed from possibleScore below
+   }
+   //================= RISK/REWARD + COST (max 5) =================
+   {
+      //--- net R:R score filled by caller via SetRRScore (needs entry/SL/TP plan)
+      rr=0;   // assigned in BuildSignalDecision where the plan exists
+   }
+   //================= aggregate with missing-data renormalization (section 10) =========
+   double possible=g_wPrice+g_wTrend+g_wVolume+g_wMomentum+g_wVWAP+g_wVol+g_wMacro+g_wOptions+g_wRR;
+   if(InpNormalizeMissingExternalData)
+   {
+      if(AvailableMacroCount()==0)possible-=g_wMacro;
+      if(!OptionsDataUsable())possible-=g_wOptions;
+   }
+   if(possible<=0)possible=1;
+   double raw=price+trend+volu+mom+vwapS+volat+macro+opts+rr;
+   //--- scale raw (absolute category maxima) into the weight space, then normalize
+   double scale=possible/MathMax(1.0,(g_wPrice+g_wTrend+g_wVolume+g_wMomentum+g_wVWAP+g_wVol+g_wMacro+g_wOptions+g_wRR));
+   raw*=scale;
+   out.priceAction=price;out.trend=trend;out.volumeLiquidity=volu;out.momentum=mom;
+   out.vwapLocation=vwapS;out.volatility=volat;out.macro=macro;out.options=opts;out.riskReward=rr;
+   out.rawScore=raw;out.possibleScore=possible;
+   out.normalizedScore=(g_weightSum>0?raw/possible*100.0:0);
+   return out.normalizedScore;
+}
+
+//--- 16. setup-specific minimum NET R:R (no universal 1:3)
+double SetupMinNetRR(string setupName)
+{
+   if(StringFind(setupName,"pullback")>=0)return InpMinNetRR_EMAPullback;
+   if(StringFind(setupName,"reversion")>=0)return InpMinNetRR_VWAPReversion;
+   if(StringFind(setupName,"London")>=0)return InpMinNetRR_LondonBreakout;
+   if(StringFind(setupName,"NY")>=0)return InpMinNetRR_NYMomentum;
+   if(StringFind(setupName,"RCV")>=0)return MathMax(InpRecoveryMinRR,1.0);   // recovery keeps its own (stricter)
+   return InpMinNetRR_ComplexMode;
+}
+
+//--- 12/13. centralized BUY/SELL/NO_TRADE decision. Called from TryArm AFTER the setup
+//--- exists (setup-driven: confidence classifies, never manufactures trades).
+ENUM_SIGNAL_DECISION BuildSignalDecision(int dir,double entry,double sl,double t1,double t2,double t3,double lots,ENUM_WINDOW_ID w,bool hv,string setupName)
+{
+   SignalDecision d;
+   ZeroMemory(d);
+   d.instrument=eaSymbol;
+   d.direction=dir;
+   d.entry=entry;d.stopLoss=sl;d.tp1=t1;d.tp2=t2;d.tp3=t3;
+   d.quantity=lots;d.window=w;d.highVolatility=hv;
+   d.setupName=setupName;
+   d.structure=g_structureState;
+   d.directionRegime=g_dirRegime;
+   d.environmentRegime=g_envRegime;
+   d.volumeState=g_volumeState;
+   d.spreadPoints=SpreadPoints();
+   d.spreadPercentile=SpreadPercentile();
+   d.spreadToATR=(g_atr>0?d.spreadPoints*broker.point/g_atr*100.0:0);
+   d.expectedSlippage=ExpectedSlippagePoints();
+   //--- confidence for the proposed side and the opposite side
+   string reasonsL="",reasonsS="";
+   ConfidenceBreakdown cd,co;
+   double confProp=ComputeConfidence(dir,cd,reasonsL,true);
+   double confOpp=ComputeConfidence(-dir,co,reasonsS,false);
+   d.confidenceBreakdown=cd;
+   d.confidence=confProp;d.oppositeConfidence=confOpp;
+   d.confidenceGap=MathAbs(confProp-confOpp);
+   //--- net R:R for the proposed plan (uses the authoritative cost engine)
+   double slDist=MathAbs(entry-sl);
+   double riskMoney=CalculateRealTradeRiskMoney(dir,lots,entry,sl);
+   double grossTP1=PriceMoveMoney(MathAbs(t1-entry),lots);
+   double netTP1=grossTP1-ExpectedAllInCost(lots);
+   double netRR=(riskMoney>0?netTP1/riskMoney:0);
+   d.riskMoney=riskMoney;
+   d.riskPct=(GetConservativeCapitalBase()>0?riskMoney/GetConservativeCapitalBase()*100.0:0);
+   d.potentialRewardMoney=grossTP1;
+   d.netPotentialRewardMoney=netTP1;
+   d.riskReward=netRR;
+   d.expectedCost=ExpectedAllInCost(lots);
+   //--- R:R quality score into the 5-point category (section 17)
+   double minRR=SetupMinNetRR(setupName);
+   if(netRR>=minRR)
+   {
+      double excellent=minRR*1.6;
+      cd.riskReward=(netRR>=excellent?5.0:5.0*(netRR-minRR)/(excellent-minRR));
+      reasonsL+="RR_PASS ";
+      double costPct=(grossTP1>0?d.expectedCost/grossTP1*100.0:999);
+      if(costPct<=InpMaxCostToTP1Pct*0.6)reasonsL+="COST_PASS ";
+   }
+   else reasonsL+="RR_FAIL ";
+   //--- recompute normalized score with the R:R points included
+   double possible=cd.possibleScore;
+   double rawNoRR=cd.rawScore;
+   // rawScore already included riskReward=0 from ComputeConfidence; add scored R:R now
+   d.confidenceBreakdown.riskReward=cd.riskReward;
+   d.confidenceBreakdown.rawScore=rawNoRR+cd.riskReward;
+   d.confidenceBreakdown.normalizedScore=(possible>0?(rawNoRR+cd.riskReward)/possible*100.0:0);
+   confProp=d.confidenceBreakdown.normalizedScore;
+   d.confidence=confProp;
+   //--- environment block checks first (sections 8/32)
+   if(g_envRegime==ENV_EXTREME_VOLATILITY){d.decision=SIGNAL_NO_TRADE;d.gateReason="EXTREME_VOLATILITY";g_envRejects[2]++;g_lastDecision=d;return d.decision;}
+   if(g_envRegime==ENV_LOW_LIQUIDITY){d.decision=SIGNAL_NO_TRADE;d.gateReason="LOW_LIQUIDITY";g_envRejects[3]++;g_lastDecision=d;return d.decision;}
+   if(g_envRegime==ENV_DISORDER){d.decision=SIGNAL_NO_TRADE;d.gateReason="DISORDER";g_envRejects[4]++;g_lastDecision=d;return d.decision;}
+   //--- adaptive threshold
+   double thr=EffectiveConfidenceThreshold();
+   //--- directional gap: both sides above threshold need separation
+   bool oppAbove=(confOpp>=thr);
+   bool propAbove=(confProp>=thr);
+   if(!propAbove)
+   {
+      d.decision=SIGNAL_NO_TRADE;
+      d.gateReason="CONFIDENCE_LOW "+DoubleToString(confProp,1)+"<"+DoubleToString(thr,1);
+      g_lastDecision=d;return d.decision;
+   }
+   if(oppAbove&&(confProp-confOpp)<InpMinDirectionalConfidenceGap)
+   {
+      d.decision=SIGNAL_NO_TRADE;
+      d.gateReason="DIRECTION_AMBIGUOUS gap="+DoubleToString(confProp-confOpp,1);
+      g_lastDecision=d;return d.decision;
+   }
+   //--- net R:R hard quality gate (setup-specific)
+   if(netRR<minRR)
+   {
+      d.decision=SIGNAL_NO_TRADE;
+      d.gateReason="NET_RR_FAIL "+DoubleToString(netRR,2)+"<"+DoubleToString(minRR,2);
+      g_lastDecision=d;return d.decision;
+   }
+   //--- regime risk request: SIDEWAYS reduces via multiplier request (environment blocks handled above)
+   if(RegimeRiskMultiplier()<=0){d.decision=SIGNAL_NO_TRADE;d.gateReason="REGIME_BLOCK";g_lastDecision=d;return d.decision;}
+   //--- PASSED: decision stands subject to all existing downstream gates (TryArm continues)
+   d.decision=(dir>0?SIGNAL_BUY:SIGNAL_SELL);
+   d.signalReasons=reasonsL;
+   d.gateReason="CONF_PASS "+DoubleToString(confProp,1)+"/"+DoubleToString(thr,1);
+   g_lastDecision=d;
+   return d.decision;
+}
 
 bool LiveMomentumConfirm(int dir)
 {
@@ -4125,6 +4922,19 @@ void TryArm()
                             (SpreadPoints()+ExpectedSlippagePoints())*broker.point*InpTP1SpreadMultiple);
       if(g_atr>0&&MathAbs(t1-entry0)<minTP1){g_gateReason="TP1_TOO_TIGHT";return;}
    }
+   //--- [SIGNAL QUALITY] centralized confidence/regime decision (prompt.md sections 8-15).
+   //--- Setup already exists (setup-driven); the confidence engine classifies and may veto.
+   if(InpUseConfidenceEngine&&InpAutoCapitalProfile)
+   {
+      double dEntry=(dir>0?Ask():Bid());   // market plans enter here; pending adjusted below for straddle
+      ENUM_SIGNAL_DECISION dec=BuildSignalDecision(dir,dEntry,sl,t1,t2,t3,lots,w,hv,setup);
+      if(dec==SIGNAL_NO_TRADE)
+      {
+         g_gateReason=(g_lastDecision.gateReason!=""?g_lastDecision.gateReason:"NO_TRADE");
+         return;
+      }
+      g_gateReason="SIGNAL "+(dec==SIGNAL_BUY?"BUY":"SELL")+" conf "+DoubleToString(g_lastDecision.confidence,1);
+   }
    int layers=(directional?1:MathMax(1,MathMin(3,InpStraddleLayers)));if(hv&&InpAB_EnableHighVol)layers=MathMin(2,layers+1);
    // Ultra-scalp mode: always a single MARKET order - pendings/straddles add latency
    // and complexity that a scalp does not need.
@@ -4169,7 +4979,7 @@ void TryArm()
          if(InpUseSRZones&&g_atr>0){double ne,fe,st;int ix;double srx=(dir>0?Ask():Bid());
             if(SR_NearestAbove(srx,InpSRMinStrengthToUse,ne,fe,st,ix)){srUp=ne;srUpS=st;srUpD=MathAbs(ne-srx)/g_atr;}
             if(SR_NearestBelow(srx,InpSRMinStrengthToUse,ne,fe,st,ix)){srDn=ne;srDnS=st;srDnD=MathAbs(srx-ne)/g_atr;}}
-         FileWrite(g_log,TimeToString(ServerNow(),TIME_DATE|TIME_SECONDS),"ARM",WindowName(w),dir,setup,DoubleToString(SpreadPoints(),1),DoubleToString(SpreadPercentile(),1),DoubleToString(ATRPercentile(),1),DoubleToString(g_volRatio,2),DoubleToString(risk,2),DoubleToString(t1,broker.digits),DoubleToString(t2,broker.digits),DoubleToString(t3,broker.digits),srMd,IntegerToString(g_srCount),DoubleToString(srUp,broker.digits),DoubleToString(srUpS,2),DoubleToString(srUpD,2),DoubleToString(srDn,broker.digits),DoubleToString(srDnS,2),DoubleToString(srDnD,2),(g_srTpSnapped?"1":"0"),(g_srSlShifted?"1":"0"),g_srBlockReason,CapitalProfileName(g_capitalProfile),DoubleToString(GetEquityUSD(),2),DoubleToString(GetConservativeCapitalBase(),2),DoubleToString(GetEffectiveTradeRiskPct(w,hv),3),DoubleToString(g_lastAllowedRiskMoney,2),DoubleToString(g_lastRawLots,3),DoubleToString(g_lastFinalLots,3),DoubleToString(g_lastActualRiskMoney,2),DoubleToString(g_lastRequiredMargin,2),DoubleToString((g_atr>0?SpreadPoints()*broker.point/g_atr*100.0:0),2),IntegerToString(AdaptiveDeviationPoints()),DoubleToString((g_commissionRTPerLot>0?g_commissionRTPerLot:InpCommissionPerLotRTFallback),2),DoubleToString(ExpectedAllInCost(lots),2),g_lastRiskReason,IntegerToString(g_lastOrderCheckRetcode));
+         FileWrite(g_log,TimeToString(ServerNow(),TIME_DATE|TIME_SECONDS),"ARM",WindowName(w),dir,setup,DoubleToString(SpreadPoints(),1),DoubleToString(SpreadPercentile(),1),DoubleToString(ATRPercentile(),1),DoubleToString(g_volRatio,2),DoubleToString(risk,2),DoubleToString(t1,broker.digits),DoubleToString(t2,broker.digits),DoubleToString(t3,broker.digits),srMd,IntegerToString(g_srCount),DoubleToString(srUp,broker.digits),DoubleToString(srUpS,2),DoubleToString(srUpD,2),DoubleToString(srDn,broker.digits),DoubleToString(srDnS,2),DoubleToString(srDnD,2),(g_srTpSnapped?"1":"0"),(g_srSlShifted?"1":"0"),g_srBlockReason,CapitalProfileName(g_capitalProfile),DoubleToString(GetEquityUSD(),2),DoubleToString(GetConservativeCapitalBase(),2),DoubleToString(GetEffectiveTradeRiskPct(w,hv),3),DoubleToString(g_lastAllowedRiskMoney,2),DoubleToString(g_lastRawLots,3),DoubleToString(g_lastFinalLots,3),DoubleToString(g_lastActualRiskMoney,2),DoubleToString(g_lastRequiredMargin,2),DoubleToString((g_atr>0?SpreadPoints()*broker.point/g_atr*100.0:0),2),IntegerToString(AdaptiveDeviationPoints()),DoubleToString((g_commissionRTPerLot>0?g_commissionRTPerLot:InpCommissionPerLotRTFallback),2),DoubleToString(ExpectedAllInCost(lots),2),g_lastRiskReason,IntegerToString(g_lastOrderCheckRetcode),EnumToString(g_lastDecision.decision),DoubleToString(g_lastDecision.confidence,1),DoubleToString(g_lastDecision.confidence,1),DoubleToString(g_lastDecision.oppositeConfidence,1),DoubleToString(g_lastDecision.confidenceGap,1),DoubleToString(g_lastDecision.confidenceBreakdown.priceAction,1),DoubleToString(g_lastDecision.confidenceBreakdown.trend,1),DoubleToString(g_lastDecision.confidenceBreakdown.volumeLiquidity,1),DoubleToString(g_lastDecision.confidenceBreakdown.momentum,1),DoubleToString(g_lastDecision.confidenceBreakdown.vwapLocation,1),DoubleToString(g_lastDecision.confidenceBreakdown.volatility,1),DoubleToString(g_lastDecision.confidenceBreakdown.macro,1),DoubleToString(g_lastDecision.confidenceBreakdown.options,1),DoubleToString(g_lastDecision.confidenceBreakdown.riskReward,1),StructureStateName(g_structureState),DirectionRegimeName(g_dirRegime),EnvironmentRegimeName(g_envRegime),VolumeStateName(g_volumeState),DoubleToString(g_volumePercentile,0),DoubleToString(g_ema9,broker.digits),DoubleToString(g_ema20,broker.digits),DoubleToString(g_ema50,broker.digits),DoubleToString(g_ema200,broker.digits),DoubleToString(g_macdMain,5),DoubleToString(g_macdSignal,5),DoubleToString(g_macdHist,5),DoubleToString(g_lastDecision.riskReward,2),DoubleToString(SetupMinNetRR(g_lastDecision.setupName),2),(OptionsDataUsable()?"YES":"NO"));
       }
    }
 }
@@ -4393,6 +5203,36 @@ void UpdateOverallPerformance(double net,double rr)
    g_perfCumNet+=net;g_perfPeakNet=MathMax(g_perfPeakNet,g_perfCumNet);g_perfMaxDDMoney=MathMax(g_perfMaxDDMoney,g_perfPeakNet-g_perfCumNet);
 }
 
+//--- 35/36/37. record a closed trade into confidence/setup/regime buckets (telemetry only)
+void RecordPerfBuckets(double conf,int dir,ENUM_ENVIRONMENT_REGIME env,double rr,string setupName)
+{
+   //--- confidence bucket 70-74 / 75-79 / 80-84 / 85-89 / 90+
+   int b=0;
+   if(conf>=90)b=4;else if(conf>=85)b=3;else if(conf>=80)b=2;else if(conf>=75)b=1;else b=0;
+   if(conf<70)b=-1;
+   if(b>=0)
+   {
+      g_confBuckets[b].trades++;if(rr>0)g_confBuckets[b].wins++;else if(rr<0)g_confBuckets[b].losses++;
+      g_confBuckets[b].netR+=rr;g_confBuckets[b].rSum+=rr;
+   }
+   //--- setup bucket: EMA_PULLBACK / VWAP_REVERSION / LONDON_BREAKOUT / NY_MOMENTUM / COMPLEX / RECOVERY
+   int si=4;   // COMPLEX default
+   StringToLower(setupName);
+   if(StringFind(setupName,"pullback")>=0)si=0;
+   else if(StringFind(setupName,"reversion")>=0)si=1;
+   else if(StringFind(setupName,"london")>=0)si=2;
+   else if(StringFind(setupName,"ny")>=0)si=3;
+   else if(StringFind(setupName,"rcv")>=0)si=5;
+   g_setupStats[si].trades++;if(rr>0)g_setupStats[si].wins++;else if(rr<0)g_setupStats[si].losses++;
+   g_setupStats[si].netR+=rr;g_setupStats[si].rSum+=rr;
+   //--- regime bucket: direction accepted count + environment accepted/reject counts
+   int di=(dir>0?(g_dirRegime<=REGIME_BULLISH?0:1):(g_dirRegime>=REGIME_BEARISH?4:3));
+   if(g_dirRegime==REGIME_STRONG_BULLISH)di=0;else if(g_dirRegime==REGIME_BULLISH)di=1;
+   else if(g_dirRegime==REGIME_SIDEWAYS)di=2;else if(g_dirRegime==REGIME_BEARISH)di=3;else di=4;
+   g_regimeTrades[di]++;
+   g_envTrades[(int)env]++;
+}
+
 void FinalizeWindowTrade(int idx,double net,double gross,double costs)
 {
    if(idx<0||idx>=ArraySize(g_ps))return;PositionState s=g_ps[idx];ENUM_WINDOW_ID w=s.window;
@@ -4402,6 +5242,8 @@ void FinalizeWindowTrade(int idx,double net,double gross,double costs)
    if(w<=WIN_NONE||w>=WIN_COUNT){RemovePS(idx);return;}
    g_ws[w].trades++;g_ws[w].netPL+=net;g_ws[w].grossPL+=gross;g_ws[w].costs+=costs;g_ws[w].slipSum+=MathAbs(s.entrySlipPts);g_ws[w].spreadPctSum+=s.entrySpreadPct;g_ws[w].atrPctSum+=s.entryAtrPct;g_ws[w].volRatioSum+=s.entryVolRatio;g_ws[w].maeSum+=s.maePrice;g_ws[w].mfeSum+=s.mfePrice;if(net>0){g_ws[w].wins++;g_consecutiveLosses=0;}else if(net<0){g_ws[w].losses++;g_consecutiveLosses++;}
    double rr=(s.initialRiskMoney>0?net/s.initialRiskMoney:0);UpdateOverallPerformance(net,rr);g_ws[w].rSum+=rr;PushRecentR(w,rr);g_ws[w].peakNet=MathMax(g_ws[w].peakNet,g_ws[w].netPL);g_ws[w].maxDD=MathMax(g_ws[w].maxDD,g_ws[w].peakNet-g_ws[w].netPL);PushRecentNet(w,net);RefreshWindowGating(w);RemovePS(idx);
+   //--- [SIGNAL QUALITY] confidence/setup/regime buckets: use the confidence recorded at ARM time
+   RecordPerfBuckets(g_lastDecision.confidence,s.direction,g_envRegime,rr,s.setupId);
 }
 
 void LearnCommission(double dealComm,double dealVol)
@@ -4592,7 +5434,7 @@ void LoadState()
 void OpenLog()
 {
    if(!InpUseLogFile)return;string n="PAT101_"+eaSymbol+"_"+TimeToString(ServerNow(),TIME_DATE)+".csv";StringReplace(n,".","-");StringReplace(n,":","-");
-   g_log=FileOpen(n,FILE_CSV|FILE_READ|FILE_WRITE|FILE_SHARE_READ|FILE_COMMON,';');if(g_log==INVALID_HANDLE)return;if(FileSize(g_log)==0)FileWrite(g_log,"server_time","event","window","dir","setup","spread_pts","spread_pct","atr_pct","vol_ratio","risk_money","tp1","tp2","tp3","sr_mode","sr_zone_count","sr_up_price","sr_up_strength","sr_up_dist_atr","sr_dn_price","sr_dn_strength","sr_dn_dist_atr","sr_tp_snapped","sr_sl_shifted","sr_block_reason","capital_profile","equity_usd","capital_base","effective_risk_pct","allowed_risk_money","raw_lots","final_lots","actual_risk_money","required_margin","spread_to_atr_pct","adaptive_deviation","commission_rt_lot","expected_allin_cost","sizing_reason","ordercheck_retcode");FileSeek(g_log,0,SEEK_END);
+   g_log=FileOpen(n,FILE_CSV|FILE_READ|FILE_WRITE|FILE_SHARE_READ|FILE_COMMON,';');if(g_log==INVALID_HANDLE)return;if(FileSize(g_log)==0)FileWrite(g_log,"server_time","event","window","dir","setup","spread_pts","spread_pct","atr_pct","vol_ratio","risk_money","tp1","tp2","tp3","sr_mode","sr_zone_count","sr_up_price","sr_up_strength","sr_up_dist_atr","sr_dn_price","sr_dn_strength","sr_dn_dist_atr","sr_tp_snapped","sr_sl_shifted","sr_block_reason","capital_profile","equity_usd","capital_base","effective_risk_pct","allowed_risk_money","raw_lots","final_lots","actual_risk_money","required_margin","spread_to_atr_pct","adaptive_deviation","commission_rt_lot","expected_allin_cost","sizing_reason","ordercheck_retcode","signal_decision","confidence","long_confidence","short_confidence","confidence_gap","price_action_score","trend_score","volume_liquidity_score","momentum_score","vwap_score","volatility_score","macro_score","options_score","risk_reward_score","structure_state","direction_regime","environment_regime","volume_state","volume_percentile","ema9","ema20","ema50","ema200","macd_main","macd_signal","macd_hist","net_rr","min_net_rr_setup","options_available");FileSeek(g_log,0,SEEK_END);
 }
 
 void PrintSummary()
@@ -4971,6 +5813,13 @@ void DashUpdate(bool force=false)
       DashRow("R_VOL",1,yR,volLine,C_TXT2);
       double spATR=(g_atr>0?sp*broker.point/g_atr*100.0:0);
       DashRow("R_ADAPT",1,yR,"Sprd/ATR "+DoubleToString(spATR,1)+"%  Dev "+IntegerToString(AdaptiveDeviationPoints())+"pt  Chk "+(g_lastOrderCheckRetcode==0?"OK":IntegerToString(g_lastOrderCheckRetcode)),C_TXT2);
+      //--- [SIGNAL QUALITY] compact telemetry (section 33): cached values only
+      string decTxt=(g_lastDecision.decision==SIGNAL_BUY?"BUY":(g_lastDecision.decision==SIGNAL_SELL?"SELL":"NO TRADE"));
+      color decCol=(g_lastDecision.decision==SIGNAL_BUY?C_UP_TXT:(g_lastDecision.decision==SIGNAL_SELL?C_DN_TXT:C_DIM));
+      DashRow("R_SIGQ",1,yR,"Decision "+decTxt+"  "+g_lastDecision.setupName+"  Conf "+DoubleToString(g_lastDecision.confidence,1)+"/"+DoubleToString(EffectiveConfidenceThreshold(),1),decCol);
+      DashRow("R_SIGQ2",1,yR,"L/S "+DoubleToString(g_lastDecision.confidence,1)+"/"+DoubleToString(g_lastDecision.oppositeConfidence,1)+" gap "+DoubleToString(g_lastDecision.confidenceGap,1)+"  NetRR "+DoubleToString(g_lastDecision.riskReward,2),C_TXT2);
+      DashRow("R_SIGQ3",1,yR,StructureStateName(g_structureState)+"  "+DirectionRegimeName(g_dirRegime)+"  "+EnvironmentRegimeName(g_envRegime)+"  Vol "+VolumeStateName(g_volumeState)+"(p"+DoubleToString(g_volumePercentile,0)+")",C_TXT2);
+      DashRow("R_SIGQ4",1,yR,"EMA9/20/50/200 "+DoubleToString(g_ema9,1)+"/"+DoubleToString(g_ema20,1)+"/"+DoubleToString(g_ema50,1)+"/"+DoubleToString(g_ema200,1)+"  MACD "+(g_macdHist>0?"BULL":(g_macdHist<0?"BEAR":"FLAT")),C_TXT2);
    }
 
    DashSection("RE",1,yR,"execution");
@@ -5110,6 +5959,11 @@ int OnInit()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))Print("WARNING: MQL trade permission denied - check Allow Algo Trading in EA settings.");
    if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))Print("WARNING: Account forbids expert trading.");
    hATR=iATR(eaSymbol,PERIOD_M1,InpATRPeriod);hADX=iADX(eaSymbol,PERIOD_M1,InpADXPeriod);hEMA20=iMA(eaSymbol,PERIOD_M1,InpEMA20Period,0,MODE_EMA,PRICE_CLOSE);hEMA50=iMA(eaSymbol,PERIOD_M1,InpEMA50Period,0,MODE_EMA,PRICE_CLOSE);hH1EMA20=iMA(eaSymbol,PERIOD_H1,20,0,MODE_EMA,PRICE_CLOSE);hH1EMA50=iMA(eaSymbol,PERIOD_H1,50,0,MODE_EMA,PRICE_CLOSE);hM15EMA20=iMA(eaSymbol,PERIOD_M15,20,0,MODE_EMA,PRICE_CLOSE);hM15EMA50=iMA(eaSymbol,PERIOD_M15,50,0,MODE_EMA,PRICE_CLOSE);hRSI=iRSI(eaSymbol,PERIOD_M1,InpRSIPeriod,PRICE_CLOSE);hM5E20=iMA(eaSymbol,PERIOD_M5,20,0,MODE_EMA,PRICE_CLOSE);hM5E50=iMA(eaSymbol,PERIOD_M5,50,0,MODE_EMA,PRICE_CLOSE);hM5ADX=iADX(eaSymbol,PERIOD_M5,14);
+   //--- [SIGNAL QUALITY] new indicator handles (sections 4/5/6)
+   if(InpUseEMA9)hEMA9=iMA(eaSymbol,PERIOD_M1,InpEMA9Period,0,MODE_EMA,PRICE_CLOSE);
+   if(InpUseEMA200)hEMA200=iMA(eaSymbol,PERIOD_M1,InpEMA200Period,0,MODE_EMA,PRICE_CLOSE);
+   if(InpUseMACD)hMACD=iMACD(eaSymbol,PERIOD_M1,InpMACDFast,InpMACDSlow,InpMACDSignal,PRICE_CLOSE);
+   if((InpUseEMA9&&hEMA9==INVALID_HANDLE)||(InpUseEMA200&&hEMA200==INVALID_HANDLE)||(InpUseMACD&&hMACD==INVALID_HANDLE)){Print("Signal-quality indicator initialization failed");return INIT_FAILED;}
    if(hATR==INVALID_HANDLE||hADX==INVALID_HANDLE||hEMA20==INVALID_HANDLE||hEMA50==INVALID_HANDLE||hH1EMA20==INVALID_HANDLE||hH1EMA50==INVALID_HANDLE||hM15EMA20==INVALID_HANDLE||hM15EMA50==INVALID_HANDLE||hRSI==INVALID_HANDLE||hM5E20==INVALID_HANDLE||hM5E50==INVALID_HANDLE||hM5ADX==INVALID_HANDLE){Print("Indicator initialization failed");return INIT_FAILED;}
    if(!SR_Init()){Print("SR module initialization failed");return INIT_FAILED;}   // [SR]
    g_x=InpPanelX;g_y=InpPanelY;
@@ -5119,6 +5973,12 @@ int OnInit()
     if(sx>=0&&sy>=0){g_x=sx;g_y=sy;}}
    ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
    PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();
+   //--- [SIGNAL QUALITY] weight validation + classification warm start (sections 42/44/45)
+   InitConfidenceWeights();
+   if(g_confTelemetry!="")Print("SIGNAL QUALITY: ",g_confTelemetry);
+   g_options.available=false;g_options.timestamp=0;g_options.source="none";   // fail-open until a provider fills it
+   UpdateStructureState();UpdateVolumeEngine();UpdateDirectionRegime();UpdateEnvironmentRegime();
+   Print("SIGNAL QUALITY: structure=",StructureStateName(g_structureState)," dirRegime=",DirectionRegimeName(g_dirRegime)," env=",EnvironmentRegimeName(g_envRegime)," vol=",VolumeStateName(g_volumeState)," (p",DoubleToString(g_volumePercentile,0),") threshold=",DoubleToString(EffectiveConfidenceThreshold(),1));
    // [CAPITAL ENGINE] classify once at init + log the profile environment
    g_capitalProfile=GetCapitalProfile();
    Print("CAPITAL ENGINE: profile=",CapitalProfileName(g_capitalProfile)," equity=",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)," ",broker.currency," equityUSD=",DoubleToString(GetEquityUSD(),2)," capitalBase=",DoubleToString(GetConservativeCapitalBase(),2)," baseRisk=",DoubleToString(GetProfileBaseRiskPct(),3),"% aggregate=",DoubleToString(GetProfileAggregateRiskPct(),2),"% maxPositions=",GetProfileMaxPositions(),(g_usdConvertNote!=""?" ["+g_usdConvertNote+"]":""));
@@ -5148,7 +6008,7 @@ void OnDeinit(const int reason)
 {
    SR_Deinit();   // [SR] remove every SR chart object before existing cleanup
    EventKillTimer();if(InpPersistState)SaveState();if(g_log!=INVALID_HANDLE){FileFlush(g_log);FileClose(g_log);g_log=INVALID_HANDLE;}WriteWindowReport();WritePerformanceReport();DashDestroy();
-   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);if(hM5E20!=INVALID_HANDLE)IndicatorRelease(hM5E20);if(hM5E50!=INVALID_HANDLE)IndicatorRelease(hM5E50);if(hM5ADX!=INVALID_HANDLE)IndicatorRelease(hM5ADX);PrintSummary();
+   if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);if(hEMA20!=INVALID_HANDLE)IndicatorRelease(hEMA20);if(hEMA50!=INVALID_HANDLE)IndicatorRelease(hEMA50);if(hH1EMA20!=INVALID_HANDLE)IndicatorRelease(hH1EMA20);if(hH1EMA50!=INVALID_HANDLE)IndicatorRelease(hH1EMA50);if(hM15EMA20!=INVALID_HANDLE)IndicatorRelease(hM15EMA20);if(hM15EMA50!=INVALID_HANDLE)IndicatorRelease(hM15EMA50);if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);if(hM5E20!=INVALID_HANDLE)IndicatorRelease(hM5E20);if(hM5E50!=INVALID_HANDLE)IndicatorRelease(hM5E50);if(hM5ADX!=INVALID_HANDLE)IndicatorRelease(hM5ADX);if(hEMA9!=INVALID_HANDLE)IndicatorRelease(hEMA9);if(hEMA200!=INVALID_HANDLE)IndicatorRelease(hEMA200);if(hMACD!=INVALID_HANDLE)IndicatorRelease(hMACD);PrintSummary();
 }
 
 void OnTick()
@@ -5157,6 +6017,11 @@ void OnTick()
    ProcessMobileCommands();         // [LICENSE] mobile command bridge (cheap: scans orders)
    RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();bool nb=IsNewBar();UpdateIndicators();RefreshFMPMacro(false);SR_Rebuild();   // [SR] throttled; before signal evaluation
    if(nb){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);
+      //--- [SIGNAL QUALITY] per-bar refresh: structure, volume states, regimes (sections 3/7/8)
+      UpdateStructureState();
+      UpdateVolumeEngine();
+      UpdateDirectionRegime();
+      UpdateEnvironmentRegime();
       // ultra-scalp v2 state
       double rsiBuf[1];if(CopyBuffer(hRSI,0,1,1,rsiBuf)>0)g_rsi=rsiBuf[0];
       double e20[1],e50[1],adx[1],adxp[1],adxm[1];

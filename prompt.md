@@ -2,2109 +2,2181 @@ You are modifying my EXISTING production MQL5 Expert Advisor:
 
 Predict-A-Trade-Ultra.mq5
 
+The file has ALREADY been upgraded with the broker-native adaptive capital/risk engine from prompt.md.
+
+DO NOT undo, weaken, replace, bypass or reimplement that work.
+
+This task is ONLY to add the remaining high-value MARKET ANALYSIS / SIGNAL QUALITY / REGIME / CONFIDENCE features identified in the latest audit.
+
+======================================================================
+0. PRIMARY RULE
+===============
+
 DO NOT rebuild the EA from scratch.
 
-DO NOT replace it with a new/simple EA.
+DO NOT create a new/simple EA.
 
-DO NOT copy generic MQL4/MQL5 percentage-TP examples into this EA.
+DO NOT remove existing working modules.
 
-Perform an IN-PLACE, SURGICAL, PRODUCTION-GRADE upgrade of the existing file.
+DO NOT change existing strategy behavior unnecessarily.
+
+Perform a SURGICAL ADDITIVE UPGRADE.
+
+The EXISTING Predict-A-Trade-Ultra.mq5 is the primary source of truth.
+
+Preserve all current functionality including:
+
+* Adaptive capital profiles
+* Auto risk sizing
+* OrderCalcProfit
+* OrderCalcMargin
+* OrderCheck
+* Adaptive spread/slippage logic
+* Aggregate/directional/window risk controls
+* Sydney/Tokyo/London/New York sessions
+* Session overlaps
+* High Volatility engine
+* SMC
+* BOS
+* CHOCH
+* FVG
+* IFVG
+* PTB
+* VWAP
+* EMA20
+* EMA50
+* SuperTrend
+* ADX
+* RSI
+* ATR
+* Bollinger calculations
+* volume filter
+* relative volume
+* liquidity filter
+* support/resistance engine
+* macro/FMP
+* EURUSD intermarket logic
+* TP1/TP2/TP3
+* structure-aware SL/TP
+* cost-adjusted BE
+* trailing
+* recovery
+* no martingale
+* no averaging down
+* news protection
+* disorder protection
+* swap protection
+* licensing
+* mobile commands
+* dashboard
+* logging
+* persistence
+* broker-server-time synchronization.
 
 ======================================================================
-0. REFERENCE HIERARCHY — MANDATORY
-==================================
 
-Use the following hierarchy when making decisions:
-
-REFERENCE 1 — PRIMARY / AUTHORITATIVE:
-The EXISTING Predict-A-Trade-Ultra.mq5 source.
-
-Its existing strategy logic, architecture, broker telemetry, risk controls, session engine, dashboard, logging, licensing, SMC, SR, execution protections and existing working behavior are the primary source of truth.
-
-REFERENCE 2 — SECONDARY DESIGN REFERENCE:
-"Predict-A-Trade-Ultra.mq5 — Percentage & Multi-Account Compatibility Audit"
-
-Use it to identify fixed-value/account-scaling problems, but DO NOT blindly copy its proposed formulas/defaults.
-
-Specifically DO NOT blindly adopt:
-
-* increased risk simply to force small accounts to trade;
-* 3% minimum-lot risk for Micro accounts;
-* manual margin formula contract × price / leverage as primary calculation;
-* commission as percentage of XAUUSD notional;
-* balance-percentage TP price targeting;
-* fixed-lot scaling tables.
-
-REFERENCE 3 — MQL5 NATIVE API / PLATFORM BEHAVIOR:
-For monetary P/L, margin and request validation, use native MQL5 APIs as authoritative:
-
-OrderCalcProfit()
-OrderCalcMargin()
-OrderCheck()
-
-Use actual SymbolInfo*/AccountInfo* broker/account specifications.
-
-Do NOT recreate broker margin/P&L formulas manually when native MQL5 can calculate them.
-
-======================================================================
-
-1. CORE MISSION
+1. MISSION
    ======================================================================
 
-Upgrade ONLY the:
+Add the following missing/improved components:
 
-CAPITAL
-RISK
-POSITION SIZING
-BROKER NORMALIZATION
-COST
-MARGIN
-SPREAD
-SLIPPAGE
-PRE-TRADE VALIDATION
-PERFORMANCE NORMALIZATION
+1. Explicit HH / HL / LH / LL market-structure classifier
+2. EMA 9
+3. EMA 200
+4. Proper MACD implementation
+5. Volume Spike / Volume Percentile classification
+6. Unified Direction Regime Engine
+7. Unified Environment Regime Engine
+8. Weighted 0-100 Confidence Engine
+9. Configurable minimum confidence threshold
+10. BUY / SELL / NO_TRADE centralized decision
+11. Central SignalDecision telemetry structure
+12. Setup-specific NET R:R validation
+13. Optional Gold Options/OI architecture, but advisory and fail-open
+14. Detailed Signal Reasons / Gate Reasons
+15. Dashboard + CSV integration for all new telemetry.
 
-layers.
+Do NOT add ROC at this stage.
 
-The same EA must safely adapt to:
+Do NOT duplicate Bollinger Bands because the existing EA already computes them.
 
-$50-$500
-$500-$5,000
-$5,000+
-$10,000+
-$50,000+
-$100,000+
-
-and different:
-
-brokers
-account currencies
-leverage levels
-XAUUSD contract sizes
-tick sizes
-tick values
-digits
-points
-minimum volumes
-maximum volumes
-volume steps
-volume limits
-stop levels
-freeze levels
-spreads
-commissions
-slippage profiles
-hedging accounts
-netting accounts.
-
-THE DESIGN PRINCIPLE IS:
-
-CAPITAL %
-→
-REAL RISK MONEY
-→
-REAL BROKER LOSS AT SL
-→
-EXECUTION COST
-→
-BROKER-VALID VOLUME
-→
-MARGIN VALIDATION
-→
-ORDERCHECK
-→
-ORDERSEND.
-
-DO NOT use:
-
-ACCOUNT SIZE → FIXED LOT SIZE TABLE.
+Do NOT add Theta/Vega as direct trade-entry votes.
 
 ======================================================================
-2. ABSOLUTELY PRESERVE EXISTING EA FUNCTIONALITY
-================================================
+2. FIRST AUDIT EXISTING SOURCE
+==============================
 
-Do NOT remove, weaken, bypass or rewrite unrelated logic including:
+Before modifying anything, search the ENTIRE EA for:
 
-Sydney
-Tokyo
-London
-New York
-Sydney/Tokyo overlap
-Tokyo/London overlap
-London open
-London/New York overlap
-New York open
-verified expansion windows
-broker-server-time synchronization
-UTC/DST handling
-High Volatility engine
+EMA
+EMA20
+EMA50
+SuperTrend
+VWAP
+RSI
+MACD
+ATR
+ADX
+Bollinger
+g_bbUp
+g_bbLo
+g_bbMid
+volume
+g_volRatio
 SMC
 BOS
 CHOCH
-liquidity sweeps
+swing
+liquidity
 FVG
 IFVG
 PTB
-VWAP
-EMA
-SuperTrend
-ADX
-ATR
-RSI
-volume filtering
-liquidity filtering
-support/resistance zones
-macro/FMP
-EURUSD
-news protection
-market disorder protection
-swap protection
-TP1/TP2/TP3
-cost-adjusted break-even
-trailing
-recovery/reversal
-no martingale
-no averaging down
-daily loss protection
-weekly loss protection
-monthly loss protection
-floating drawdown protection
-aggregate risk protection
-directional risk protection
-per-window risk protection
-performance statistics
-license system
-mobile commands
-persistence
-CSV logging
-dashboard
-existing filling-mode handling
-stop/freeze-level enforcement
-existing trade-state management.
-
-Signal generation is NOT the target of this upgrade.
-
-======================================================================
-3. FIRST PERFORM A FULL DEPENDENCY AUDIT
-========================================
-
-Before editing, search the ENTIRE source for every use of:
-
-InpRiskPercent
-0.35
-InpLotSize
-InpMaxTotalLots
-InpMinLotMaxRiskPct
-InpMinNetProfitTP1Money
-InpMinNetProfitTP2Money
-InpMinNetProfitTP3Money
-InpDisableExpectancyMoney
-InpRiskReduceExpectancyMoney
-InpMaxSpreadPoints
-InpMaxSlippagePoints
-InpMaxAverageSlippagePoints
-InpExtremeSlippagePoints
-InpRecoveryMaxSpreadPts
-InpCommissionPerLotRTFallback
-ACCOUNT_BALANCE
-ACCOUNT_EQUITY
-ACCOUNT_MARGIN
-ACCOUNT_MARGIN_FREE
-SYMBOL_VOLUME_MIN
-SYMBOL_VOLUME_MAX
-SYMBOL_VOLUME_STEP
-SYMBOL_VOLUME_LIMIT
-SYMBOL_TRADE_TICK_SIZE
-SYMBOL_TRADE_TICK_VALUE
-SYMBOL_TRADE_CONTRACT_SIZE
-g_ptScale
-PriceMoveMoney
-ExpectedAllInCost
-CurrentRiskPct
-CalculateLot
-RiskRoom
-NetProfitValid
-WindowExpectancy
-WindowAvgR
-RefreshWindowGating
-WindowRiskMultiplier
+g_score
+g_scoreMax
+g_dirBias
+InpMinFilterScore
+EvaluateFilters
+EvaluateScalpSignal
+CanEnter
 TryArm
-TryRecovery
-MarketOrder
-PlaceStop
-SendOrder
-ClosePartialSafe
-ProcessMobileCommands
-PAT_RISK_OVERRIDE.
+BuildThreeTargets
+RiskRoom
+ScalpStopDistance
+ScalpTarget
+SR_
+HighVolatility
+IsDisorder
+CandleDisplacementATR
+RollingBreakout
+Window
+Macro
+FMP
+EURUSD.
 
-Classify every fixed value as:
+Do NOT add duplicate data when equivalent telemetry already exists.
 
-A. CAPITAL-DEPENDENT
-B. BROKER/EXECUTION-DEPENDENT
-C. MARKET/VOLATILITY-DEPENDENT
-D. STRATEGY CONSTANT
-E. DISPLAY/TELEMETRY ONLY.
-
-Only convert category A to capital percentage/R-based logic.
-
-Do NOT blindly turn every number into a percentage.
+Reuse existing handles, buffers and cached values whenever possible.
 
 ======================================================================
-4. CAPITAL PROFILE ENGINE
-=========================
+3. EXPLICIT MARKET STRUCTURE CLASSIFIER
+=======================================
 
-Add:
+Add an explicit structural state rather than relying only on scattered BOS/CHOCH votes.
 
-enum ENUM_CAPITAL_PROFILE
+Create:
+
+enum ENUM_STRUCTURE_STATE
 {
-CAPITAL_MICRO=0,
-CAPITAL_STANDARD=1,
-CAPITAL_PRO=2
+STRUCTURE_UNKNOWN=0,
+STRUCTURE_HH_HL,
+STRUCTURE_LH_LL,
+STRUCTURE_TRANSITION_BULL,
+STRUCTURE_TRANSITION_BEAR,
+STRUCTURE_RANGE
 };
 
-Use USD-EQUIVALENT EQUITY ONLY for determining the profile.
+Track recent confirmed swing points from the existing swing/SMC logic.
 
-Profile boundaries:
+Prefer reusing existing swing-high/swing-low detection instead of creating an entirely separate expensive subsystem.
 
-MICRO:
-$50 <= equityUSD < $500
+Explicitly determine:
 
-STANDARD:
-$500 <= equityUSD < $5,000
+Higher High
+Higher Low
+Lower High
+Lower Low.
 
-PRO:
-equityUSD >= $5,000.
+Required concepts:
 
-Default profile parameters:
+Bullish structure:
+HH + HL sequence
 
-MICRO:
-Base trade risk = 0.25%
-Aggregate open risk = 0.75%
-Directional open risk = 0.50%
-Per-window risk budget = 0.50%
-Maximum strategy positions = 1
-Minimum-lot exception ceiling = 1.00%
+Bearish structure:
+LH + LL sequence
 
-STANDARD:
-Base trade risk = 0.35%
-Aggregate open risk = 1.50%
-Directional open risk = 1.00%
-Per-window risk budget = 0.75%
-Maximum strategy positions = 2
-Minimum-lot exception ceiling = 0.75%
+Bullish transition:
+bearish/range structure followed by bullish CHOCH/BOS confirmation
 
-PRO:
-Base trade risk = 0.35%
-Aggregate open risk = 2.50%
-Directional open risk = 1.50%
-Per-window risk budget = 1.50%
-Maximum strategy positions = 3
-Minimum-lot exception ceiling = 0.50%.
+Bearish transition:
+bullish/range structure followed by bearish CHOCH/BOS confirmation
 
-IMPORTANT:
+Range:
+alternating/overlapping swings without directional progression.
 
-A larger account should scale through VOLUME.
+Add telemetry such as:
 
-Do NOT automatically increase its percentage risk.
+g_lastSwingHigh
+g_prevSwingHigh
+g_lastSwingLow
+g_prevSwingLow
+g_structureState
+g_structureBullStrength
+g_structureBearStrength.
 
-A Micro account must NOT receive a larger normal risk percentage merely because its minimum lot is inconvenient.
+Avoid using forming-bar pivots that repaint.
+
+Use CLOSED bars / confirmed swings.
+
+======================================================================
+4. EMA 9
+========
 
 Add:
 
-input bool InpAutoCapitalProfile=true;
+input bool InpUseEMA9=true;
+input int InpEMA9Period=9;
 
-When false, retain existing manual risk controls.
+Create/cached handle following the existing EMA architecture.
 
-Centralize profile access:
+Add global:
 
-ENUM_CAPITAL_PROFILE GetCapitalProfile();
-string CapitalProfileName(...);
-double GetProfileBaseRiskPct();
-double GetProfileAggregateRiskPct();
-double GetProfileDirectionalRiskPct();
-double GetProfileWindowRiskPct();
-double GetProfileMinLotRiskCeilingPct();
-int GetProfileMaxPositions();
+g_ema9.
 
-Do not scatter tier if-statements throughout the EA.
+Use EMA9 as SHORT-TERM MICRO-MOMENTUM / ENTRY TIMING.
 
-======================================================================
-5. ACCOUNT-CURRENCY AND USD PROFILE CONVERSION
-==============================================
+It must NOT become an unconditional hard gate.
 
-Risk money itself must remain in ACCOUNT CURRENCY because native:
+Examples:
 
-OrderCalcProfit()
-OrderCalcMargin()
+Bullish:
+EMA9 > EMA20
 
-return calculations appropriate for the current account.
+Bearish:
+EMA9 < EMA20.
 
-USD conversion is needed only for CAPITAL PROFILE classification and display.
+Bonus alignment:
 
-Implement:
-
-double GetEquityUSD();
-double GetAccountCurrencyToUSD();
-
-If ACCOUNT_CURRENCY == "USD":
-conversion = 1.
-
-Otherwise:
-
-discover a broker FX symbol capable of converting account currency to USD.
-
-Support:
-BASEUSD
-USDBASE
-broker suffix/prefix variants.
-
-Use existing broker Market Watch symbols where practical.
-
-Cache the conversion symbol/rate.
-
-Do not perform full symbol scans on every tick.
-
-Refresh periodically.
-
-If reliable conversion cannot be obtained:
-
-DO NOT invent a conversion rate.
-
-Use the MOST CONSERVATIVE profile temporarily:
-
-CAPITAL_MICRO
-
-and set telemetry:
-
-CAPITAL_USD_CONVERSION_UNAVAILABLE
+EMA9 > EMA20 > EMA50
 
 or
 
-CAPITAL_PROFILE_CONSERVATIVE_FALLBACK.
+EMA9 < EMA20 < EMA50.
 
-Trading may continue only under conservative limits if all other risk calculations are valid.
-
-======================================================================
-6. CONSERVATIVE CAPITAL BASE
-============================
-
-For NEW trade sizing use:
-
-balance = ACCOUNT_BALANCE
-equity = ACCOUNT_EQUITY
-
-capitalBase =
-MathMin(balance,equity).
-
-Do not size new trades from balance alone.
-
-Do not size new trades upward using floating profit.
-
-If floating loss lowers equity, new risk money must automatically decrease.
-
-Implement:
-
-double GetConservativeCapitalBase();
-
-Risk budget:
-
-riskBudgetMoney =
-capitalBase * effectiveRiskPct / 100.0.
+Do not require perfect EMA stacking on every valid mean-reversion setup.
 
 ======================================================================
-7. REMOVE HARDCODED SIMPLE-SCALP 0.35%
-======================================
-
-The existing source currently has Simple Scalp risk effectively hardcoded separately from the main risk input.
-
-Remove that divergence.
-
-There must be ONE authoritative risk resolver:
-
-double GetEffectiveTradeRiskPct(
-ENUM_WINDOW_ID window,
-bool highVolatility
-);
-
-Required order:
-
-profile base risk
-→
-optional validated manual/mobile request
-→
-drawdown reduction
-→
-consecutive-loss reduction
-→
-window-performance multiplier
-→
-HV multiplier
-→
-profile hard ceiling
-→
-final effective risk.
-
-Do NOT allow Simple Scalp Mode to bypass this resolver.
-
-Do NOT allow Complex Mode to use a separate sizing architecture.
-
-======================================================================
-8. CONSECUTIVE LOSS / DRAWDOWN MODIFIERS
-========================================
-
-Preserve current consecutive-loss risk decay.
-
-Preserve current drawdown risk reduction.
-
-Preserve no-martingale and no-averaging-down behavior.
-
-Review the current universal 0.10% risk floor.
-
-The floor must NEVER cause risk to increase after modifiers.
-
-Use logic equivalent to:
-
-finalRisk =
-MathMin(baseAllowedRisk,
-modifiedRisk);
-
-Any floor must be bounded by the current profile's safe base risk and must not undo drawdown/loss reductions.
-
-A risk modifier should never turn a reduced-risk situation into a larger-risk situation.
-
-======================================================================
-9. MOBILE RISK OVERRIDE — FIX AND INTEGRATE
-===========================================
-
-The current EA accepts a mobile command of the form:
-
-RISK_x
-
-and writes:
-
-PAT_RISK_OVERRIDE.
-
-Audit whether this Global Variable is actually read by the risk engine.
-
-If it is currently only written and not consumed, fix this.
-
-Treat mobile risk as a REQUEST, not permission to bypass safety.
-
-Example:
-
-requestedRisk =
-mobile override.
-
-final permitted risk =
-MIN(
-requestedRisk,
-profile base-risk ceiling,
-drawdown-adjusted ceiling,
-loss-adjusted ceiling,
-remaining aggregate capacity,
-remaining directional capacity,
-remaining window capacity
-).
-
-Do not allow the existing possible 5% command range to create 5% live risk.
-
-If a request is clamped, log:
-
-RISK_OVERRIDE_CLAMPED
-requested
-accepted.
-
-Provide a way for the existing mobile/control architecture to clear the override if one already exists or add a safe clear behavior without breaking compatibility.
-
-======================================================================
-10. FIX UNDERWATER-POSITION CLAMP
-=================================
-
-The existing underwater-position protection currently references the legacy base risk.
-
-Make it reference the dynamically resolved profile base risk.
-
-If ANY own position is underwater:
-
-a new trade must never size above the normally permitted base risk.
-
-No martingale.
-
-No loss-based size increase.
-
-No recovery size escalation.
-
-======================================================================
-11. AUTO RISK SIZING
-====================
+5. EMA 200
+==========
 
 Add:
 
-input bool InpAutoRiskSizing=true;
-
-When true:
-
-InpLotSize must NOT control normal position sizing.
-
-Do not fall back to arbitrary 0.05 lots when sizing fails.
-
-InpLotSize may remain only for:
-
-manual/debug/legacy mode when InpAutoRiskSizing=false.
-
-When Auto mode cannot derive safe volume:
-
-BLOCK THE TRADE.
-
-Do not manufacture a volume.
-
-======================================================================
-12. REMOVE FIXED 1.20 LOT BOTTLENECK
-====================================
-
-The existing:
-
-InpMaxTotalLots
-
-must NOT limit production auto-sizing by default.
-
-Do not delete it if backward compatibility with .set files matters.
+input bool InpUseEMA200=true;
+input int InpEMA200Period=200;
 
 Add:
 
-input bool InpUseAbsoluteLotEmergencyCap=false;
-input double InpEmergencyMaxTotalLots=0.0;
+g_ema200.
 
-When AutoRiskSizing=true and emergency cap=false:
-
-do not apply the old fixed lot limit.
-
-The effective lot limit must instead come from:
-
-risk budget
-aggregate risk
-directional risk
-window risk
-margin
-SYMBOL_VOLUME_MAX
-SYMBOL_VOLUME_LIMIT
-free margin
-broker validation.
-
-A $50,000 account must not be restricted simply because the legacy setting says 1.20 lots.
-
-======================================================================
-13. EXTEND BROKER PROFILE
-=========================
-
-Retain all existing BrokerProfile data.
-
-Where useful add/cache:
-
-SYMBOL_TRADE_TICK_VALUE_PROFIT
-SYMBOL_TRADE_TICK_VALUE_LOSS
-SYMBOL_VOLUME_LIMIT
-SYMBOL_TRADE_CALC_MODE.
-
-Do NOT assume:
-
-SYMBOL_TRADE_TICK_VALUE
-
-is identical under all profit/loss situations.
-
-Use the richer values as fallback telemetry.
-
-Native OrderCalcProfit remains primary for risk calculation.
-
-======================================================================
-14. ORDERCALCPROFIT — AUTHORITATIVE SL RISK
-===========================================
-
-Add a helper:
-
-bool CalcBrokerPnL(
-int direction,
-double volume,
-double openPrice,
-double closePrice,
-double &pnl
-);
-
-For BUY:
-ORDER_TYPE_BUY.
-
-For SELL:
-ORDER_TYPE_SELL.
+EMA200 is a REGIME / MAJOR TREND CONTEXT indicator.
 
 Use:
 
-OrderCalcProfit()
+price > EMA200
+as bullish major bias.
 
-as primary.
+price < EMA200
+as bearish major bias.
 
-To estimate SL loss:
+EMA200 should contribute confidence and regime information.
 
-lossAtSL =
-MathAbs(calculatedPnL).
+It should NOT automatically veto every counter-trend VWAP mean-reversion scalp.
 
-This value is already in account currency.
-
-If OrderCalcProfit fails:
-
-fallback using the existing tick-size/tick-value/PriceMoveMoney architecture.
-
-Prefer SYMBOL_TRADE_TICK_VALUE_LOSS for a loss calculation if valid.
-
-Log fallback use.
-
-Do not silently assume zero risk.
+Instead reduce confidence or apply setup-specific rules.
 
 ======================================================================
-15. COST MODEL — KEEP ONE SOURCE OF TRUTH
-=========================================
+6. PROPER MACD
+==============
+
+The existing source contains references/comments about MACD voting but does not have a complete real MACD implementation.
+
+Add native MQL5 MACD.
+
+Inputs:
+
+input bool InpUseMACD=true;
+input int InpMACDFast=12;
+input int InpMACDSlow=26;
+input int InpMACDSignal=9;
+
+Use:
+
+iMACD()
+
+for M1.
+
+Optionally add M5 MACD only if it can be reused efficiently and materially helps regime scoring.
+
+Cache:
+
+g_macdMain
+g_macdSignal
+g_macdHist.
+
+Define:
+
+hist =
+main - signal.
+
+Bullish momentum evidence:
+
+main > signal
+hist > 0
+hist increasing where practical.
+
+Bearish:
+
+main < signal
+hist < 0
+hist decreasing.
+
+Do NOT make MACD mandatory on every setup.
+
+It is a momentum confidence contributor.
+
+======================================================================
+7. VOLUME SPIKE / PERCENTILE ENGINE
+===================================
 
 The EA already has:
 
-LearnCommission()
-CommissionRT()
-ExpectedSlippagePoints()
-ExpectedAllInCost().
+g_volRatio
+volume moving average
+InpMinVolumeRatio
+InpHVMinVolumeRatio.
 
-Preserve the centralized design.
+Do NOT duplicate them.
 
-The current EA learns actual commission from:
+Extend with a rolling volume distribution.
 
-DEAL_COMMISSION / DEAL_VOLUME
+Add a fixed-size ring buffer such as:
 
-and maintains learned round-trip commission per lot.
+VOLUME_SAMPLES = 256.
 
-KEEP THIS.
+Track:
 
-Do NOT replace commission fallback with percentage of XAUUSD notional.
+relative volume
+or
+tick volume normalized by rolling average.
 
-Commission is broker/execution-dependent, not account-size-dependent.
+Create:
 
-Priority:
+double VolumePercentile();
+ENUM_VOLUME_STATE GetVolumeState();
 
-1. sufficiently learned actual commission
-2. configured account-currency-per-lot fallback.
+Enum:
 
-Keep:
+enum ENUM_VOLUME_STATE
+{
+VOLUME_LOW=0,
+VOLUME_NORMAL,
+VOLUME_ELEVATED,
+VOLUME_SPIKE,
+VOLUME_EXTREME
+};
 
-InpCommissionPerLotRTFallback
+Suggested classification:
 
-or a backwards-compatible equivalent.
+LOW:
+percentile < 25
 
-Document clearly:
+NORMAL:
+25-65
 
-fallback is ACCOUNT-CURRENCY round-trip commission per 1.0 lot.
+ELEVATED:
+65-85
 
-Do not treat $7 as universal USD if account currency differs.
+SPIKE:
+85-97
 
-Do not double count entry/exit commission.
+EXTREME:
 
-======================================================================
-16. REAL TRADE RISK MONEY
-=========================
+> 97.
 
-Create ONE authoritative method such as:
+Do not treat these exact numbers as immutable hidden constants; expose key thresholds as inputs if practical.
 
-double CalculateRealTradeRiskMoney(
-int direction,
-double volume,
-double entry,
-double stopLoss
-);
+Use volume percentile together with relative volume.
 
-It must combine:
+Volume Spike should increase confidence ONLY when:
 
-broker-calculated SL loss
-+
-expected all-in execution costs
+directional candle quality
+market structure
+trend
+or breakout
 
-using a single consistent cost basis.
+supports the same direction.
 
-Audit ExpectedAllInCost carefully.
+An isolated volume spike without directional confirmation should NOT automatically create a trade.
 
-Avoid:
-
-spread counted once in OrderCalcProfit and again incorrectly;
-commission counted twice;
-slippage counted twice.
-
-Document what each component includes.
-
-Use the exact same basis for:
-
-CalculateLot
-RiskRoom new-risk request
-initialRiskMoney
-R calculation
-TP viability.
+Extreme volume combined with abnormal ATR/spread/displacement should contribute to DISORDER or EXTREME_VOLATILITY classification.
 
 ======================================================================
-17. REBUILD CALCULATELOT AS AN ITERATIVE SAFE SOLVER
-====================================================
+8. TWO-DIMENSION MARKET REGIME ENGINE
+=====================================
 
-CalculateLot must become broker-native.
+Do NOT force trend and volatility into one mutually-exclusive enum.
 
-Required process:
+Create TWO independent regime dimensions.
 
-1. resolve effective risk %
-2. obtain capitalBase
-3. calculate allowed riskMoney
-4. obtain exact planned entry
-5. obtain exact planned SL
-6. calculate risk per 1.0 lot
-7. derive raw lots
-8. FLOOR to SYMBOL_VOLUME_STEP
-9. enforce SYMBOL_VOLUME_MIN
-10. enforce SYMBOL_VOLUME_MAX
-11. enforce SYMBOL_VOLUME_LIMIT
-12. recalculate REAL risk at normalized volume
-13. verify actual risk <= allowed risk
-14. verify aggregate risk
-15. verify directional risk
-16. verify window risk
-17. verify margin
-18. verify broker request
-19. return approved volume.
+A. DIRECTION REGIME
 
-Volume normalization MUST round DOWN.
+enum ENUM_DIRECTION_REGIME
+{
+REGIME_STRONG_BULLISH=0,
+REGIME_BULLISH,
+REGIME_SIDEWAYS,
+REGIME_BEARISH,
+REGIME_STRONG_BEARISH
+};
 
-Never round upward beyond the permitted risk.
+B. ENVIRONMENT REGIME
 
-If a normalized volume is too large:
+enum ENUM_ENVIRONMENT_REGIME
+{
+ENV_NORMAL=0,
+ENV_HIGH_VOLATILITY,
+ENV_EXTREME_VOLATILITY,
+ENV_LOW_LIQUIDITY,
+ENV_DISORDER
+};
 
-reduce by one volume step
-and recalculate.
+Direction Regime should use weighted evidence from:
 
-Use bounded loops.
+* explicit HH/HL/LH/LL structure
+* BOS/CHOCH
+* EMA9
+* EMA20
+* EMA50
+* EMA200
+* M5 EMA20/50
+* M15/H1 EMA20/50 where already available
+* VWAP relationship
+* ADX
+* DI+/DI-
+* SuperTrend
+* optionally macro direction as a SMALL contextual input.
 
-Do not create unbounded iterations.
+Environment Regime should use:
 
-======================================================================
-18. MINIMUM LOT FEASIBILITY
-===========================
+* ATR percentile
+* current ATR / rolling ATR
+* spread percentile
+* spread/ATR
+* volume percentile
+* relative volume
+* candle displacement ATR
+* slippage quality
+* liquidity ratio
+* existing IsDisorder()
+* existing High Volatility engine.
 
-Preserve the useful concept of minimum-lot fallback, but make it fully broker-native.
+Required behavior:
 
-If calculated lots < SYMBOL_VOLUME_MIN:
+SIDEWAYS:
+risk multiplier <= 1
+prefer reduced risk or stricter confidence requirement.
 
-calculate actual minimum-volume risk using:
+HIGH_VOLATILITY:
+reduce risk using existing HV risk architecture.
 
-OrderCalcProfit at the proposed SL
-+
-expected execution costs.
+EXTREME_VOLATILITY:
+BLOCK NEW ENTRIES.
 
-Then:
+LOW_LIQUIDITY:
+BLOCK NEW ENTRIES.
 
-minLotRiskPct =
-minimumLotRiskMoney /
-capitalBase *
-100.
+DISORDER:
+BLOCK NEW ENTRIES.
 
-Maximum exception ceilings:
-
-MICRO = 1.00%
-STANDARD = 0.75%
-PRO = 0.50%.
-
-These are HARD exception ceilings.
-
-They are NOT target risk percentages.
-
-If minimum volume exceeds the ceiling:
-
-DO NOT TRADE.
-
-Gate:
-
-MIN_LOT_RISK_TOO_HIGH.
-
-Log:
-
-profile
-balance
-equity
-capitalBase
-equityUSD
-symbol
-contractSize
-tickSize
-tickValue
-volumeMin
-volumeStep
-SL distance
-minimum lot risk money
-minimum lot risk %
-profile exception limit
-required margin.
-
-IMPORTANT:
-
-Do not attempt to guarantee a $50 account can trade.
-
-If 0.01 XAUUSD risks 4-8% of a $50 account:
-
-BLOCK IT.
-
-The correct solution is a broker offering:
-
-0.001 volume
-smaller contract
-micro/cent gold specification.
-
-Never weaken risk limits to force execution.
+Do NOT interfere with position management / emergency exits.
 
 ======================================================================
-19. RISKROOM MUST USE PROFILE LIMITS
-====================================
+9. CENTRAL 0-100 CONFIDENCE ENGINE
+==================================
 
-Preserve RiskRoom's current percentage architecture.
-
-When InpAutoCapitalProfile=true use:
-
-GetProfileAggregateRiskPct()
-GetProfileDirectionalRiskPct()
-GetProfileWindowRiskPct().
-
-When false, use existing manual inputs.
-
-Do not weaken:
-
-InpDailyLossPercent
-InpMaxFloatingDDPercent
-InpWeeklyLossLimit
-InpMonthlyLossLimit.
-
-These remain hard protection limits unless existing behavior is more conservative.
-
-======================================================================
-20. OPEN RISK CALCULATION
-=========================
-
-Audit OpenRiskMoney().
-
-Where possible compute each open position's SL risk using broker-native P/L estimation rather than only raw tick multiplication.
-
-For an existing position:
-
-use its actual open price
-current SL
-current volume.
-
-If a position has no SL:
-
-do NOT treat its risk as zero.
-
-Use a conservative policy:
-
-* treat it as maximum/unbounded risk for gating,
-  OR
-* use a configured catastrophe fallback,
-  consistent with existing safety philosophy.
-
-Do not permit missing-SL positions to create false available aggregate-risk room.
-
-======================================================================
-21. DYNAMIC MAX POSITIONS
-=========================
-
-When AutoCapitalProfile=true:
-
-MICRO = 1
-STANDARD = 2
-PRO = 3.
-
-But this is NOT permission to open that many.
-
-All other constraints take precedence:
-
-netting restriction
-aggregate risk
-directional risk
-window risk
-margin
-spread
-slippage
-news
-disorder
-session logic.
-
-For netting accounts preserve the existing strategy restriction.
-
-======================================================================
-22. NATIVE MARGIN CALCULATION
-=============================
+Upgrade the existing g_score/g_scoreMax architecture into a normalized confidence engine while preserving backward compatibility.
 
 Add:
 
-input bool InpUseAdaptiveMarginProtection=true;
-input double InpMaxNewTradeMarginPct=20.0;
-input double InpMinFreeMarginReservePct=50.0;
+input bool InpUseConfidenceEngine=true;
+input double InpMinConfidenceScore=75.0;
 
-DO NOT use:
+Use weighted categories:
 
-contract × price / leverage
+PRICE ACTION / SMC ................. 20
+TREND / MTF ALIGNMENT .............. 15
+VOLUME / LIQUIDITY ................. 15
+MOMENTUM ........................... 10
+VWAP / PRICE LOCATION .............. 10
+VOLATILITY / ENVIRONMENT ........... 10
+MACRO / INTERMARKET ................ 10
+OPTIONS / OI ....................... 5
+RISK/REWARD + COST QUALITY ......... 5
 
-as the primary margin formula.
+TOTAL AVAILABLE = 100.
+
+Create:
+
+struct ConfidenceBreakdown
+{
+double priceAction;
+double trend;
+double volumeLiquidity;
+double momentum;
+double vwapLocation;
+double volatility;
+double macro;
+double options;
+double riskReward;
+double rawScore;
+double possibleScore;
+double normalizedScore;
+};
+
+Do not allocate points merely because an indicator exists.
+
+Points must reflect directional agreement with the proposed trade.
+
+Compute independently for LONG and SHORT:
+
+ConfidenceBreakdown longConfidence;
+ConfidenceBreakdown shortConfidence.
+
+Then:
+
+NormalizedScore =
+rawScore / possibleScore * 100.
+
+======================================================================
+10. MISSING DATA RENORMALIZATION
+================================
+
+This is MANDATORY.
+
+If an external category is unavailable:
+
+OPTIONS
+MACRO
+
+do NOT automatically score zero unless the user explicitly configures fail-closed behavior.
+
+Instead remove that category's weight from possibleScore.
+
+Example:
+
+available raw = 82
+available possible = 90
+
+normalized =
+82/90*100
+=========
+
+91.11.
 
 Use:
 
-OrderCalcMargin()
+input bool InpNormalizeMissingExternalData=true;
 
-with actual:
+Preserve existing:
 
-request order type
-symbol
-volume
-planned price.
+InpRequireExternalData
 
-OrderCalcMargin returns margin in account currency.
+behavior.
 
-Use its value.
+If InpRequireExternalData=true:
+existing external-data hard blocking may remain.
 
-Important:
-
-OrderCalcMargin estimates the proposed operation separately and does not represent total account margin after all positions.
-
-Therefore combine it with:
-
-ACCOUNT_MARGIN
-ACCOUNT_MARGIN_FREE
-ACCOUNT_EQUITY
-
-and later OrderCheck result.
-
-Calculate:
-
-projectedFreeMargin =
-freeMarginBefore - requiredMargin
-
-and appropriate projected margin usage.
-
-If volume violates margin protection:
-
-decrease one volume step and retest.
-
-If safe volume falls below minimum:
-
-reject.
-
-Gate:
-
-MARGIN_CAP
-or
-MARGIN_INSUFFICIENT.
+Otherwise:
+fail-open with confidence renormalization.
 
 ======================================================================
-23. ORDERCHECK BEFORE NEW ORDERS
-================================
+11. CONFIDENCE THRESHOLD BY ENVIRONMENT
+=======================================
 
-Add a dedicated:
+Base:
 
-bool PreflightNewTrade(
-MqlTradeRequest &request,
-MqlTradeCheckResult &check,
-string &reason
-);
+InpMinConfidenceScore=75.
 
-Call it before EVERY NEW:
+Add optional:
 
-market entry
-pending entry
-recovery entry.
+input bool InpUseAdaptiveConfidenceThreshold=true;
+input double InpConfidenceHighVol=80.0;
+input double InpConfidenceSideways=82.0;
+input double InpConfidenceLowLiquidity=100.0;
+input double InpConfidenceExtremeVol=100.0;
 
-Do NOT blindly place OrderCheck inside SendOrder for:
+Logic:
 
-position modifications
-SL/TP modifications
-order deletion
+NORMAL:
 
-unless appropriate.
+> =75
 
-Preflight NEW trade requests only.
+HIGH VOLATILITY:
 
-Order:
+> =80
 
-construct final MqlTradeRequest
+SIDEWAYS:
+
+> =82
+
+EXTREME VOLATILITY:
+NO TRADE regardless of score
+
+LOW LIQUIDITY:
+NO TRADE regardless of score
+
+DISORDER:
+NO TRADE.
+
+Do not accidentally block the four primary sessions simply because their session expectancy is weak; keep existing session behavior.
+
+Regime gates and session gating are separate concerns.
+
+======================================================================
+12. BUY / SELL / NO_TRADE DECISION ENGINE
+=========================================
+
+Add:
+
+enum ENUM_SIGNAL_DECISION
+{
+SIGNAL_NO_TRADE=0,
+SIGNAL_BUY=1,
+SIGNAL_SELL=-1
+};
+
+Create ONE centralized decision function:
+
+ENUM_SIGNAL_DECISION BuildSignalDecision(...);
+
+Avoid scattered contradictory direction logic.
+
+Final LONG requires:
+
+* proposed long setup exists
+* structure compatible
+* trend confirmation appropriate to setup
+* momentum confirmation
+* volume/liquidity acceptable
+* environment not blocked
+* confidence >= adaptive threshold
+* setup valid
+* risk/reward valid
+* risk budget available
+* spread valid
+* slippage valid
+* margin valid
+* news/disorder/swap/session gates valid.
+
+SHORT symmetrical.
+
+If both BUY and SELL confidence exceed threshold simultaneously:
+
+do NOT blindly pick one.
+
+Require minimum confidence separation:
+
+input double InpMinDirectionalConfidenceGap=5.0;
+
+Example:
+
+LONG=84
+SHORT=81
+
+gap=3
+
+=> NO_TRADE unless the setup itself supplies a strong directional override.
+
+This prevents ambiguous market entries.
+
+======================================================================
+13. CENTRAL SIGNALDECISION STRUCT
+=================================
+
+Create a central structure similar to:
+
+struct SignalDecision
+{
+string instrument;
+
+ENUM_SIGNAL_DECISION decision;
+int direction;
+
+double entry;
+double stopLoss;
+double tp1;
+double tp2;
+double tp3;
+
+double quantity;
+
+double riskMoney;
+double riskPct;
+
+double potentialRewardMoney;
+double netPotentialRewardMoney;
+double riskReward;
+
+double confidence;
+double oppositeConfidence;
+double confidenceGap;
+
+ENUM_STRUCTURE_STATE structure;
+ENUM_DIRECTION_REGIME directionRegime;
+ENUM_ENVIRONMENT_REGIME environmentRegime;
+ENUM_VOLUME_STATE volumeState;
+
+ENUM_WINDOW_ID window;
+
+bool highVolatility;
+
+double spreadPoints;
+double spreadPercentile;
+double spreadToATR;
+double expectedSlippage;
+double expectedCost;
+
+ConfidenceBreakdown confidenceBreakdown;
+
+string setupName;
+string signalReasons;
+string gateReason;
+};
+
+This structure becomes the authoritative internal trade-plan/telemetry object.
+
+Do not break existing state structs.
+
+This is additive.
+
+======================================================================
+14. SIGNAL REASONS
+==================
+
+For every candidate generate clear reasons.
+
+Examples:
+
+LONG reasons:
+
+HH_HL
+BULLISH_BOS
+EMA9>EMA20
+EMA20>EMA50
+ABOVE_EMA200
+M5_TREND_UP
+VWAP_SUPPORT
+RSI_BULLISH
+MACD_BULLISH
+VOLUME_SPIKE_CONFIRMED
+SR_BREAKOUT
+LIQUIDITY_SWEEP_LOW
+FVG_BULL
+IFVG_BULL
+PTB_BULL
+MACRO_SUPPORTIVE
+RR_PASS
+COST_PASS.
+
+SHORT symmetrical.
+
+Do NOT concatenate an unbounded massive string every tick.
+
+Build reason text only:
+
+* when evaluating a final candidate
+* when logging
+* when dashboard needs it.
+
+======================================================================
+15. SETUP-SPECIFIC CONFIDENCE
+=============================
+
+Do NOT apply identical rules to every setup.
+
+Recognize existing setups such as:
+
+EMA PULLBACK
+VWAP MEAN REVERSION
+LONDON BREAKOUT
+NY MOMENTUM
+GENERAL COMPLEX-MODE SIGNAL
+RECOVERY.
+
+Weight evidence differently where appropriate.
+
+Example:
+
+EMA PULLBACK:
+trend alignment more important
+EMA9/20/50 useful
+EMA200 contextual
+MACD useful
+volume moderate confirmation.
+
+VWAP REVERSION:
+VWAP deviation
+RSI extreme
+Bollinger recross
+reversal candle
+M5 ADX not too strong
+support/resistance
+liquidity sweep
+
+more important than perfect EMA stacking.
+
+London Breakout:
+range break
+volume spike
+ATR expansion
+M5 trend
+VWAP
+market structure
+spread/liquidity
+
+more important.
+
+NY Momentum:
+volume
+breakout
+trend
+MACD
+EMA alignment
+VWAP
+liquidity.
+
+Do not make mean-reversion impossible because trend-following components disagree.
+
+======================================================================
+16. SETUP-SPECIFIC R:R
+======================
+
+DO NOT add universal:
+
+Risk/Reward >= 3.0.
+
+That is inappropriate for the current ultra-scalp architecture.
+
+Create setup-specific minimum NET R:R.
+
+Add inputs:
+
+input double InpMinNetRR_EMAPullback=1.20;
+input double InpMinNetRR_VWAPReversion=1.00;
+input double InpMinNetRR_LondonBreakout=1.50;
+input double InpMinNetRR_NYMomentum=1.50;
+input double InpMinNetRR_ComplexMode=1.20;
+
+Recovery:
+retain existing InpRecoveryMinRR unless existing logic is stricter.
+
+NET R:R must consider:
+
+expected spread
+commission
+expected slippage
+
+where possible.
+
+Do not replace existing TP ladder.
+
+The minimum R:R is a quality gate only.
+
+Preserve:
+
+TP1
+TP2
+TP3
+existing ATR targets
+liquidity target snapping
+SR snapping
+structure-aware stops.
+
+======================================================================
+17. RISK/REWARD SCORE
+=====================
+
+The Confidence Engine allocates 5 points for R:R + cost quality.
+
+Score proportionally.
+
+Example concept:
+
+below setup minimum:
+0 and block trade.
+
+minimum achieved:
+partial score.
+
+excellent net R:R:
+full score.
+
+Also consider:
+
+expected cost / gross target reward.
+
+Do not double-count existing cost gates.
+
+Reuse ExpectedAllInCost and current net-profit viability functions.
+
+======================================================================
+18. PRICE ACTION SCORE — 20
+===========================
+
+Suggested composition:
+
+HH/HL or LH/LL ........... up to 5
+BOS / CHOCH .............. up to 5
+Liquidity sweep .......... up to 3
+FVG / IFVG / PTB ......... up to 4
+S/R structural support ... up to 3
+
+TOTAL:
+20.
+
+Do not automatically award all subcomponents.
+
+Directional alignment matters.
+
+For LONG:
+
+bullish structure votes increase long score.
+
+Bearish evidence should:
+
+* score LONG zero for that subcomponent
+* and increase SHORT confidence.
+
+Do not use negative scores unless architecture remains clean.
+
+======================================================================
+19. TREND SCORE — 15
+====================
+
+Suggested:
+
+EMA9/20 .................. 3
+EMA20/50 ................. 3
+EMA200 bias .............. 3
+M5 trend ................. 3
+M15/H1 trend/SuperTrend .. 3
+
+TOTAL 15.
+
+Reuse existing HTF EMA information.
+
+Do not create duplicate CopyBuffer calls where values already exist.
+
+======================================================================
+20. VOLUME / LIQUIDITY SCORE — 15
+=================================
+
+Suggested:
+
+Relative volume .......... 5
+Volume percentile ........ 4
+Directional spike ........ 3
+Liquidity quality ........ 3
+
+TOTAL 15.
+
+Extreme volume in disorder conditions must NOT increase trade confidence.
+
+Environment gate takes precedence.
+
+======================================================================
+21. MOMENTUM SCORE — 10
+=======================
+
+Suggested:
+
+RSI directional state .... 3
+MACD ..................... 4
+ADX/DI or displacement ... 3
+
+TOTAL 10.
+
+Do NOT add Rate of Change.
+
+Avoid redundant over-weighting of momentum.
+
+======================================================================
+22. VWAP / LOCATION SCORE — 10
+==============================
+
+Use:
+
+price vs VWAP
+VWAP bands/deviation
+setup context
+VWAP support/resistance
+Bollinger recross where appropriate.
+
+For trend setups:
+above VWAP can support long.
+
+For reversion:
+extreme deviation and valid recross can support opposite-direction entry.
+
+Make it setup-aware.
+
+======================================================================
+23. VOLATILITY SCORE — 10
+=========================
+
+Use:
+
+ATR percentile
+ATR expansion quality
+candle displacement
+spread/ATR
+HV conditions.
+
+NORMAL favorable:
+good score.
+
+HIGH VOLATILITY:
+reduced score but may still trade.
+
+EXTREME:
+BLOCK.
+
+LOW liquidity:
+BLOCK.
+
+Do not reward chaos.
+
+======================================================================
+24. MACRO / INTERMARKET SCORE — 10
+==================================
+
+Reuse existing:
+
+FMP USD basket
+SPX
+EURUSD
+macro bias.
+
+Do NOT add new external providers.
+
+Directional contribution:
+
+Gold LONG generally supported by:
+USD weakness
+risk-off where existing logic defines it.
+
+Gold SHORT:
+USD strength
+risk-on where appropriate.
+
+Respect existing macro architecture.
+
+If unavailable and external data not required:
+renormalize confidence.
+
+======================================================================
+25. OPTIONAL GOLD OPTIONS/OI MODULE
+===================================
+
+Implement the INTERNAL ARCHITECTURE but do NOT introduce a mandatory new live dependency unless an existing external API/provider can supply reliable data.
+
+Add a struct:
+
+struct GoldOptionsSnapshot
+{
+bool available;
+datetime timestamp;
+
+double callOI;
+double putOI;
+double callOIChange;
+double putOIChange;
+
+double pcr;
+
+double impliedVolatility;
+double ivPercentile;
+
+double callVolume;
+double putVolume;
+
+double nearestCallWall;
+double nearestPutWall;
+
+double callWallOI;
+double putWallOI;
+
+double gammaWall;
+bool gammaAvailable;
+
+string source;
+};
+
+Add:
+
+input bool InpUseOptionsContext=false;
+input bool InpRequireOptionsData=false;
+input int InpOptionsMaxAgeSec=900;
+
+IMPORTANT:
+
+Default:
+false.
+
+No new hard-coded API key.
+
+No external dependency should break the EA.
+
+If data is unavailable:
+
+InpRequireOptionsData=false
+→ fail open and remove 5-point weight from possible score.
+
+InpRequireOptionsData=true
+→ block entry.
+
+Do NOT add:
+
+Theta
+Vega
+
+as direct directional score components.
+
+Delta/Gamma can be stored later, but Gamma is only directional/contextual when used meaningfully around major strikes.
+
+======================================================================
+26. OPTIONS SCORE — 5
+=====================
+
+When available:
+
+PCR directional context
+OI change
+major call/put walls
+IV regime
+options volume.
+
+Suggested maximum:
+5.
+
+Do not make options dominate the M1 strategy.
+
+Example interpretations:
+
+Large put wall below spot:
+possible support context.
+
+Large call wall above:
+possible resistance context.
+
+Rising IV:
+environment risk / volatility context, not automatically directional.
+
+PCR:
+context only, do not use simplistic always-inverse rules.
+
+======================================================================
+27. STRIKE-WISE OI ARCHITECTURE
+===============================
+
+If implementing future-ready storage:
+
+define a small fixed-size structure:
+
+struct OptionStrikeLevel
+{
+double strike;
+double callOI;
+double putOI;
+double callVolume;
+double putVolume;
+};
+
+Keep max count bounded.
+
+Do not dynamically allocate huge option chains every tick.
+
+Do not fetch options chain every tick.
+
+======================================================================
+28. ENVIRONMENT RISK MODIFIERS
+==============================
+
+Integrate with the EXISTING adaptive risk system.
+
+Do NOT create a second independent lot-sizing engine.
+
+Create only a risk multiplier request.
+
+Example:
+
+double RegimeRiskMultiplier();
+
+NORMAL:
+1.00
+
+STRONG directional trend:
+1.00
+
+SIDEWAYS:
+0.50–0.75
+
+HIGH_VOLATILITY:
+reuse existing HV multiplier, do not multiply risk twice.
+
+EXTREME_VOLATILITY:
+0 / block.
+
+LOW_LIQUIDITY:
+0 / block.
+
+DISORDER:
+0 / block.
+
+CRITICAL:
+
+Do not double-reduce risk if the existing High Volatility system already applies:
+
+InpHVExtraSignalRiskMult.
+
+There must be ONE effective HV risk reduction.
+
+Audit and integrate rather than stacking duplicate multipliers.
+
+======================================================================
+29. CANENTER / TRYARM INTEGRATION
+=================================
+
+Do not rebuild all entry functions.
+
+Integrate the new central decision cleanly.
+
+Recommended flow:
+
+Existing setup detection
 →
-OrderCalcMargin validation
+Build candidate direction
 →
-risk validation
+Build SignalDecision
+→
+Determine structure
+→
+Determine regimes
+→
+Compute long/short confidence
+→
+select BUY/SELL/NO_TRADE
+→
+validate adaptive threshold
+→
+validate setup-specific R:R
+→
+existing news/session/disorder/spread/slippage gates
+→
+existing capital/risk/margin engine
+→
+order preparation
 →
 OrderCheck
 →
 OrderSend.
 
-Analyze:
+Avoid evaluating expensive full confidence calculations multiple times per tick.
 
-check.retcode
-check.comment
-check.balance
-check.equity
-check.margin
-check.margin_free
-check.margin_level.
-
-A successful OrderCheck does NOT guarantee eventual OrderSend success, so retain existing OrderSend retcode handling and retries.
-
-For invalid price/stops:
-
-do not blindly retry identical bad data.
+Cache candidate decision per relevant bar/event.
 
 ======================================================================
-24. TP1/TP2/TP3 — DO NOT TARGET BALANCE %
-=========================================
-
-CRITICAL:
-
-Do NOT change TP PRICE calculation into:
-
-"make 0.8% of account balance".
-
-Do NOT copy the generic percentage-TP EA approach.
-
-Existing TP prices should remain based on:
-
-ATR
-market structure
-VWAP
-S/R
-liquidity
-existing TP ladder rules
-R:R validation.
-
-Only replace the FIXED MONEY MINIMUM PROFIT GATES:
-
-InpMinNetProfitTP1Money
-InpMinNetProfitTP2Money
-InpMinNetProfitTP3Money.
-
-Add Auto-mode risk-relative thresholds:
-
-input bool InpUseRiskRelativeNetProfitGate=true;
-
-input double InpMinTP1NetRiskPct=10.0;
-input double InpMinTP2NetRiskPct=20.0;
-input double InpMinTP3NetRiskPct=30.0;
-
-These mean percentage of INITIAL TRADE RISK MONEY.
-
-Example:
-
-initialRiskMoney = 10 account-currency units.
-
-TP1 minimum net =
-1.0 if threshold 10%.
-
-Do not change the actual ATR/structure TP solely to meet arbitrary balance profit.
-
-Use this only as a VIABILITY gate.
-
-Create:
-
-double MinNetProfitForLeg(
-int leg,
-double initialRiskMoney
-);
-
-Refactor NetProfitValid to accept/use initialRiskMoney or an equivalent trade-plan risk value.
-
-Retain legacy money inputs for compatibility when the new gate is disabled.
-
-======================================================================
-25. R-BASED PERFORMANCE GATING
-==============================
-
-Do NOT convert performance expectancy to percentage of account balance.
-
-Use R.
-
-The EA already computes:
-
-R =
-net /
-initialRiskMoney.
-
-Build on this.
-
-The existing WindowStats currently keeps recent net-money history.
-
-Add a rolling RECENT R history, for example:
-
-double recentR[64];
-int recentRCount;
-int recentRIdx;
-
-or safely evolve the existing WindowStats structure.
-
-Add:
-
-void PushRecentR(...);
-double WindowExpectancyR(...);
-
-Suggested defaults:
-
-input bool InpUseRExpectancyGating=true;
-input double InpDisableExpectancyR=-0.10;
-input double InpRiskReduceExpectancyR=0.05;
-
-When R gating is enabled:
-
-RefreshWindowGating()
-and
-WindowRiskMultiplier()
-
-must use R expectancy, not fixed account-currency money.
-
-Preserve:
-
-InpNeverDisablePrimarySessions.
-
-Sydney
-Tokyo
-London
-New York
-
-must remain eligible if that existing setting requires it.
-
-A weak primary session may receive reduced risk.
-
-Do not remove the session.
-
-Retain money expectancy values only as legacy telemetry/backward-compatible manual mode.
-
-======================================================================
-26. ADAPTIVE SPREAD ENGINE
-==========================
-
-The EA already maintains:
-
-g_spreadBuf
-g_spreadCnt
-g_spreadAvg
-g_spreadStd
-SpreadPercentile().
-
-USE THEM.
-
-Do not duplicate the same statistics.
-
-Do NOT simply calculate:
-
-Max(fixed 35 points, learned wide spread).
-
-That can normalize a chronically poor broker into accepting dangerous costs.
-
-Create a multi-condition relative gate.
-
-Add parameters similar to:
-
-input bool InpUseAdaptiveSpreadGate=true;
-input double InpMaxSpreadToATRPct=20.0;
-input double InpMaxSpreadPercentileAdaptive=90.0;
-input double InpSpreadBaselineMultiplier=2.0;
-input int InpSpreadWarmupSamples=30;
-
-Calculate:
-
-spreadPrice =
-SpreadPoints() * broker.point.
-
-spreadToATRPct =
-spreadPrice / g_atr * 100.
-
-Use existing rolling spread baseline/statistics.
-
-Normal entry requires, after warmup:
-
-spread percentile acceptable
-AND
-spread/ATR acceptable
-AND
-spread spike ratio acceptable.
-
-During warmup:
-
-use existing normalized fixed fallback.
-
-Keep an emergency absolute sanity limit, but it should be a LAST-RESORT safety cap rather than the primary broker model.
-
-Do not permit a broker's gradually worsening spread forever just because the rolling average also becomes worse.
-
-Consider using both:
-
-short rolling baseline
-and
-existing configured fallback/sanity constraints.
-
-======================================================================
-27. ADAPTIVE SLIPPAGE
+30. SIMPLE SCALP MODE
 =====================
 
-The EA already stores recent slippage:
+Do NOT disable the existing Simple Scalp engine.
 
-g_slipBuf
-g_slipCnt
-g_slipAvg
-g_lastSlipPts.
+Its existing setups:
 
-Preserve this.
+VWAP reversion
+London breakout
+NY momentum
+EMA pullback
 
-Extend it only where necessary to derive:
+must remain.
 
-percentile
-high percentile
-optional standard deviation.
+Use the new confidence/regime engine as a FINAL QUALITY / CLASSIFICATION layer.
 
-Create:
+Do not replace those setups with a generic indicator soup.
 
-int AdaptiveDeviationPoints();
-
-Requirements:
-
-warmup → existing fallback
-mature data → learned execution profile
-respect broker point/digits
-consider slippage/ATR
-bounded minimum
-bounded maximum.
-
-Do not make deviation unlimited.
-
-The existing:
-
-InpExtremeSlippagePoints
-
-can remain an emergency/pathological fallback but must be normalized consistently.
-
-Use adaptive deviation in NEW entry requests instead of blindly:
-
-rq.deviation = InpMaxSlippagePoints.
-
-Apply carefully to closing operations:
-
-do not make emergency closes impossible because an adaptive entry deviation became too restrictive.
-
-Entry execution quality and emergency position closing may need separate logic.
+Simple mode should remain setup-driven.
 
 ======================================================================
-28. RECOVERY SPREAD / RISK
-==========================
+31. COMPLEX MODE
+================
 
-Preserve the recovery architecture.
+The full multi-filter engine may transition more directly from:
 
-Do not add martingale.
+g_score/g_scoreMax
 
-Do not enlarge recovery risk.
+to:
 
-Recovery risk must be:
+0–100 ConfidenceBreakdown.
 
-<= existing InpRecoveryRiskPct
+Maintain backward compatibility.
+
+If:
+
+InpUseConfidenceEngine=false
+
+preserve existing filter scoring behavior.
+
+If true:
+use new normalized confidence logic.
+
+======================================================================
+32. BUY / SELL / NO_TRADE RULES
+===============================
+
+LONG generally requires:
+
+valid bullish/setup candidate
 AND
-< normal permitted trade risk.
+environment allowed
+AND
+confidence >= threshold
+AND
+confidence gap adequate
+AND
+setup-specific net R:R met
+AND
+existing risk availability
+AND
+existing cost/spread/slippage/margin/news/session protections.
 
-Make recovery spread validation use a STRICTER version of the normal adaptive spread gate.
+SHORT symmetrical.
 
-Example:
+NO_TRADE if:
 
-input double InpRecoverySpreadQualityMultiplier=0.80;
+no valid setup
+OR
+confidence too low
+OR
+direction ambiguous
+OR
+SIDEWAYS confidence threshold fails
+OR
+EXTREME_VOLATILITY
+OR
+LOW_LIQUIDITY
+OR
+DISORDER
+OR
+R:R fails
+OR
+risk unavailable
+OR
+broker/execution gate fails.
 
-Recovery should require better-than-normal execution conditions.
+Do NOT create trades from confidence score alone.
 
-Preserve:
-
-RecoveryMaxLegs
-RecoveryCooldown
-RecoveryMaxAge
-RecoveryMinRR.
-
-======================================================================
-29. ATR MIN/MAX — DO NOT CONFUSE WITH CAPITAL %
-===============================================
-
-ATR is a MARKET variable.
-
-Do not convert ATR to account-balance percentage.
-
-The existing absolute-point ATR boundaries may be enhanced for broker normalization, but keep market-volatility semantics.
-
-Prefer:
-
-ATR percentile
-ATR relative to rolling ATR distribution
-price distance
-broker tick-size normalization
-
-rather than capital percentage.
-
-Do not blindly copy an AverageATR helper if it does not exist.
-
-Reuse the EA's existing ATR ring buffer and ATR percentile architecture.
-
-======================================================================
-30. POINT / PRICE NORMALIZATION AUDIT
-=====================================
-
-The EA currently has g_ptScale for 2/3-digit gold feeds.
-
-Keep backward compatibility but centralize conversion helpers:
-
-double PointsToPrice(double points);
-double PriceToPoints(double distance);
-double NormalizePriceToTick(double price);
-double NormalizePrice(double price);
-
-Where appropriate normalize price to:
-
-SYMBOL_TRADE_TICK_SIZE
-
-not merely decimal Digits.
-
-Audit every execution-related point input for consistent behavior:
-
-spread
-slippage
-stop buffer
-recovery spread
-SR front-run points
-minimum trade distance
-pending distances.
-
-Do not modify true ATR ratios.
+A valid SETUP must still exist.
 
 ======================================================================
-31. SYMBOL VOLUME LIMIT
-=======================
-
-Use:
-
-SYMBOL_VOLUME_LIMIT
-
-when available.
-
-This is distinct from:
-
-SYMBOL_VOLUME_MAX.
-
-Ensure own open + pending volume in the SAME direction does not violate the broker symbol's directional volume limit.
-
-Retain existing strategy-specific aggregate and directional risk caps in addition to the broker's volume limit.
-
-======================================================================
-32. ORDER REQUEST VOLUME RECHECK
-================================
-
-Immediately before dispatching a new request:
-
-re-read or validate:
-
-SYMBOL_VOLUME_MIN
-SYMBOL_VOLUME_MAX
-SYMBOL_VOLUME_STEP
-SYMBOL_VOLUME_LIMIT
-
-if cached broker metadata could be stale.
-
-Do not assume specifications can never change during a long terminal session.
-
-Use a low-cost refresh strategy rather than per-tick heavy querying.
-
-======================================================================
-33. FIXED LOT / MONEY SEARCH
-============================
-
-After implementing the new engine, search the full source again for:
-
-0.05
-1.20
-0.30
-0.50
-0.70
--0.20
-0.10
-0.35
-
-Do NOT blindly remove them.
-
-For every match determine whether it is:
-
-legacy input
-strategy constant
-percentage
-ATR ratio
-R threshold
-capital amount
-display text.
-
-Ensure no hidden FIXED CAPITAL-SCALE logic remains in live Auto mode.
-
-======================================================================
-34. DO NOT CHANGE EXISTING TP VOLUME SPLIT SEMANTICS
-====================================================
-
-Keep:
-
-InpTP1Pct
-InpTP2Pct
-InpTP3Pct
-
-as POSITION VOLUME FRACTIONS.
-
-Example:
-
-0.75 = 75%
-0.20 = 20%
-0.05 = 5%.
-
-Do NOT confuse these with:
-
-account risk percentages
-profit percentages.
-
-Retain existing:
-
-3-leg → 2-leg → 1-leg
-
-degradation when broker volume minimum makes partial TP impossible.
-
-Never let rounding make total allocated volume exceed the original position.
-
-======================================================================
-35. POST-NORMALIZATION VERIFICATION LOOP
-========================================
-
-For every proposed volume perform final verification:
-
-actual riskMoney
-actual riskPct
-aggregate projected riskPct
-directional projected riskPct
-window projected riskPct
-required margin
-free margin after
-broker volume rules
-symbol volume limit
-stops
-spread quality
-slippage quality
-cost viability.
-
-If invalid because volume is too large:
-
-decrement ONE broker volume step.
-
-Recalculate.
-
-Repeat with a bounded iteration count.
-
-If volume falls below volumeMin:
-
-run Min-Lot Feasibility.
-
-If that fails:
-
-reject.
-
-Never increase volume during a safety correction.
-
-======================================================================
-36. POSITION RISK INVARIANTS
-============================
-
-These are mandatory:
-
-A larger SL → same or smaller lot.
-
-Higher expected commission → same or smaller lot.
-
-Higher expected slippage → same or smaller lot.
-
-Higher spread/cost → same or smaller lot.
-
-Smaller conservative capital base → same or smaller risk money.
-
-Lower free margin → same or smaller allowed lot.
-
-Lower leverage must never create a larger accepted margin exposure.
-
-Volume normalization never rounds risk upward.
-
-Min lot never silently violates safety limit.
-
-No martingale.
-
-No averaging down.
-
-Recovery < normal risk.
-
-Aggregate <= profile aggregate cap.
-
-Directional <= profile directional cap.
-
-Window <= profile window cap.
-
-Daily/weekly/monthly breakers still take precedence.
-
-News/disorder/swap gates still take precedence.
-
-======================================================================
-37. DEPOSIT / WITHDRAWAL HANDLING
-=================================
-
-Preserve the existing stale-anchor logic.
-
-Improve only if necessary.
-
-Deposits/withdrawals should not create false:
-
-daily drawdown
-weekly drawdown
-monthly drawdown.
-
-However:
-
-do NOT reset genuine trading losses merely because equity changed.
-
-If practical, inspect balance operations/history to distinguish external balance adjustments from trading P/L.
-
-Use conservative fallback when uncertain.
-
-======================================================================
-38. DASHBOARD
+33. DASHBOARD
 =============
 
-Do not redesign the existing dashboard.
+Extend the current dashboard without redesigning it.
 
-Add compact telemetry using cached/precomputed values:
+Add concise fields:
 
-Capital Profile
-Equity USD
-Account Currency
-Capital Base
-Base Risk %
-Effective Risk %
-Allowed Risk Money
-Raw Lot
-Final Lot
-Volume Min/Step/Max
-Volume Limit
-Projected Risk Money/%
-Aggregate Risk current/max
-Directional Risk current/max
-Window Risk current/max
-Required Margin
-Free Margin
-Projected Free Margin
-Margin %
-Spread points
-Spread/ATR %
-Spread percentile
-Adaptive deviation
-Expected all-in cost
-Learned commission RT/lot
-Min-lot feasibility
-OrderCheck state
-USD conversion state.
+Decision:
+BUY / SELL / NO TRADE
 
-Do not run expensive trade simulations solely because the dashboard repaints.
+Setup:
+EMA_PULLBACK
+VWAP_REVERSION
+LONDON_BREAKOUT
+NY_MOMENTUM
+COMPLEX
+RECOVERY
+
+Confidence:
+82.4 / 75.0
+
+Long Confidence:
+82.4
+
+Short Confidence:
+48.2
+
+Confidence Gap:
+34.2
+
+Structure:
+HH-HL
+LH-LL
+RANGE
+TRANSITION
+
+Direction Regime:
+STRONG BULLISH
+BULLISH
+SIDEWAYS
+BEARISH
+STRONG BEARISH
+
+Environment:
+NORMAL
+HIGH VOL
+EXTREME VOL
+LOW LIQUIDITY
+DISORDER
+
+EMA:
+9 / 20 / 50 / 200
+
+MACD:
+BULL / BEAR / FLAT
+
+Volume:
+NORMAL / ELEVATED / SPIKE / EXTREME
+
+Volume Percentile:
+xx
+
+Net R:R:
+x.xx
+
+Signal Reasons:
+compact top reasons.
+
+Do not make dashboard too large.
+
+Prefer one or two compact rows plus details already available elsewhere.
 
 ======================================================================
-39. LOGGING
-===========
+34. CSV / PERFORMANCE LOGGING
+=============================
 
-Append telemetry without breaking existing log parsing where possible:
+Append new columns without breaking existing historical field meaning:
 
-CapitalProfile
-AccountCurrency
-Equity
-EquityUSD
-CapitalBase
-BaseRiskPct
-EffectiveRiskPct
-AllowedRiskMoney
-RawLots
-FinalLots
-ActualRiskMoney
-ActualRiskPct
-AggregateRiskPct
-DirectionalRiskPct
-WindowRiskPct
-VolumeMin
-VolumeStep
-VolumeMax
-VolumeLimit
-RequiredMargin
-FreeMarginBefore
-FreeMarginAfter
-MarginPct
-SpreadPoints
-SpreadToATRPct
+SignalDecision
+SetupName
+Confidence
+LongConfidence
+ShortConfidence
+ConfidenceGap
+
+PriceActionScore
+TrendScore
+VolumeLiquidityScore
+MomentumScore
+VWAPScore
+VolatilityScore
+MacroScore
+OptionsScore
+RiskRewardScore
+
+StructureState
+DirectionRegime
+EnvironmentRegime
+
+EMA9
+EMA20
+EMA50
+EMA200
+
+MACDMain
+MACDSignal
+MACDHist
+
+VolumeRatio
+VolumePercentile
+VolumeState
+
+ATRPercentile
 SpreadPercentile
-ExpectedSlipPts
-AdaptiveDeviation
-CommissionRTPerLot
-ExpectedAllInCost
-MinLotRiskPct
-OrderCheckRetcode
-OrderCheckComment
-RiskSizingReason.
+SpreadToATR
 
-Add gate reasons including:
+NetRR
 
-CAPITAL_TOO_SMALL
-CAPITAL_PROFILE_CONSERVATIVE_FALLBACK
-MIN_LOT_RISK_TOO_HIGH
-MARGIN_INSUFFICIENT
-MARGIN_CAP
-AGGREGATE_RISK_CAP
-DIRECTIONAL_RISK_CAP
-WINDOW_RISK_CAP
-SYMBOL_VOLUME_LIMIT
-BROKER_VOLUME_INVALID
-BROKER_STOPS_INVALID
-ORDER_CHECK_FAILED
-SPREAD_RELATIVE_HIGH
-SLIPPAGE_RELATIVE_HIGH
-COST_TOO_HIGH
-TP_NET_RISK_TOO_LOW
-RISK_OVERRIDE_CLAMPED.
+OptionsAvailable
+PCR
+IV
+IVPercentile
+NearestCallWall
+NearestPutWall
 
-Keep existing gate reasons as well.
+SignalReasons
+GateReason.
 
 ======================================================================
-40. PERFORMANCE REPORT
-======================
+35. PERFORMANCE TRACKING BY CONFIDENCE
+======================================
 
-Preserve:
+Add bounded performance buckets:
 
-number of trades
+70–74
+75–79
+80–84
+85–89
+90+.
+
+Track:
+
+trades
 wins
 losses
-win rate
+net R
+average R
+profit factor if practical.
+
+This allows later validation of whether:
+
+75
+
+is actually the right threshold.
+
+Do NOT dynamically self-optimize the live threshold yet.
+
+Telemetry only.
+
+======================================================================
+36. PERFORMANCE TRACKING BY SETUP
+=================================
+
+Track independent statistics for:
+
+EMA_PULLBACK
+VWAP_REVERSION
+LONDON_BREAKOUT
+NY_MOMENTUM
+COMPLEX
+RECOVERY.
+
+Track:
+
+trades
+wins
+losses
+net R
+avg R
 profit factor
-net R/trade
-Sharpe
-net profit
-max drawdown
+MAE
+MFE
 slippage
 spread
-commission.
+confidence.
 
-Add:
-
-capital profile
-average effective risk %
-average actual R
-window expectancy R where useful
-min-lot rejects
-margin rejects
-spread rejects
-slippage rejects
-OrderCheck rejects.
-
-Do not remove existing metrics.
+Do not let these statistics alter the strategy unless existing performance gating already supports it.
 
 ======================================================================
-41. DO NOT USE BROKER NAME HEURISTICS
-=====================================
+37. PERFORMANCE TRACKING BY REGIME
+==================================
 
-Do not determine risk simply from strings such as:
+Track:
 
-ECN
-STP
-Standard
-Micro
-Cent.
+STRONG_BULLISH
+BULLISH
+SIDEWAYS
+BEARISH
+STRONG_BEARISH
 
-Use real account/symbol economics:
+and environment:
 
-tick value
-tick size
-contract size
-volume min
-volume step
-volume max
-volume limit
-margin
-leverage
-trade mode
-margin mode
-spread
-commission
-slippage.
+NORMAL
+HIGH_VOLATILITY.
 
-Broker/company/account labels may be DISPLAY telemetry only.
+EXTREME/LOW_LIQ/DISORDER should mostly record rejected candidate counts.
+
+This will permit later evidence-based refinement.
 
 ======================================================================
-42. PERFORMANCE / CPU
+38. CPU / PERFORMANCE
 =====================
 
 This is an M1 ultra-scalper.
 
-Avoid expensive work every tick.
+Do not add expensive calculations every tick unnecessarily.
 
-Static broker values:
-cache.
+EMA/MACD:
+indicator handles and CopyBuffer.
 
-Capital profile:
-recompute when equity/currency materially changes or on reasonable timer.
+Structure:
+recalculate on new M1 bar or confirmed swing.
 
-FX conversion:
-cache and periodically refresh.
+Volume percentile:
+fixed ring buffer.
 
-OrderCalcProfit:
-use during trade sizing/risk validation, not every tick unnecessarily.
+Confidence:
+only on trade candidate / new relevant event.
 
-OrderCalcMargin:
-use during trade preparation.
+Regime:
+cached and update once per bar or when extreme conditions change.
 
-OrderCheck:
-use before new requests.
+Options:
+never fetch every tick.
 
-Spread/slippage:
-reuse current ring buffers.
+Dashboard:
+reuse cached values.
 
-Do not add external network dependencies.
+Avoid:
+
+large dynamic arrays
+unbounded CopyRates
+repeated full-history scans
+duplicate S/R calculations.
 
 ======================================================================
-43. BACKWARD COMPATIBILITY
-==========================
+39. PRICE NORMALIZATION / BROKER SAFETY
+=======================================
 
-Do not delete old inputs unnecessarily.
+Do NOT change the completed broker-native capital work.
 
-Old .set files may depend on them.
+All final entries/SL/TP/volume must still go through existing:
 
-When old inputs are superseded by Auto mode:
+broker tick-size normalization
+volume normalization
+risk engine
+OrderCalcProfit
+OrderCalcMargin
+adaptive spread
+adaptive slippage
+RiskRoom
+OrderCheck
+OrderSend.
 
-retain them
-mark comments as LEGACY/MANUAL
-clearly define when ignored.
+The new confidence engine cannot bypass any execution safeguard.
+
+======================================================================
+40. NO OVER-FILTERING
+=====================
+
+This is extremely important.
+
+Do NOT implement:
+
+EMA9
+EMA20
+EMA50
+EMA200
+VWAP
+RSI
+MACD
+ADX
+volume
+SMC
+options
+macro
+
+as ALL-REQUIRED hard gates simultaneously.
+
+That will kill valid M1 signals.
+
+Use the WEIGHTED CONFIDENCE model.
+
+Hard gates should remain limited to:
+
+* valid setup
+* environment safety
+* confidence threshold
+* R:R minimum
+* capital/risk
+* margin
+* spread/slippage
+* news/disorder
+* broker execution
+* session requirements.
+
+Everything else contributes evidence.
+
+======================================================================
+41. AVOID DOUBLE COUNTING
+=========================
+
+Audit correlated evidence.
 
 Examples:
 
-InpLotSize
-InpMaxTotalLots
-fixed TP money gates
-fixed money expectancy gates
-fixed spread/slippage fallbacks.
+EMA9/20
+EMA20/50
+M5 EMA20/50
 
-Avoid changing input types/names unless required.
+all represent trend.
 
-======================================================================
-44. SELF-TESTS
-==============
+Do not award each so heavily that trend dominates the 100-point score.
 
-Add non-trading self-test/debug checks for:
+Similarly:
 
-Profile boundary:
+ATR
+ATR percentile
+HV state
 
-49.99 or below
-50
-100
-499.99
-500
-1,000
-4,999.99
-5,000
-10,000
-50,000
-100,000.
+are related.
 
-Broker-volume scenarios:
+Volume ratio
+volume percentile
 
-0.01 min / 0.01 step
-0.001 min / 0.001 step
-different contract sizes
-2-digit XAUUSD
-3-digit XAUUSD
-volume limit.
+are related.
 
-Risk monotonicity:
+SMC BOS
+HH/HL
 
-larger SL => lot never increases
-larger commission => lot never increases
-larger slippage => lot never increases
-smaller equity => risk money never increases.
+are related.
 
-Min-lot:
+Respect category caps.
 
-unsafe min lot => blocked.
-
-Margin:
-
-insufficient margin => reduced or blocked.
-
-No real orders must be sent by self-test.
+No category may exceed its allocated maximum.
 
 ======================================================================
-45. COMPILE / VALIDATE
-======================
+42. WEIGHT VALIDATION
+=====================
 
-After editing:
+Add initialization validation.
 
-1. Re-read the complete source.
+Expected default total:
 
-2. Run searches for all old fixed-risk paths.
+Price Action = 20
+Trend = 15
+Volume/Liquidity = 15
+Momentum = 10
+VWAP = 10
+Volatility = 10
+Macro = 10
+Options = 5
+RiskReward = 5
 
-3. Check function signatures and every caller.
+TOTAL:
+100.
 
-4. Check struct changes and persistence implications.
+Prefer defining them as configurable inputs:
 
-5. Check array bounds.
+InpWeightPriceAction
+InpWeightTrend
+InpWeightVolumeLiquidity
+InpWeightMomentum
+InpWeightVWAP
+InpWeightVolatility
+InpWeightMacro
+InpWeightOptions
+InpWeightRiskReward.
 
-6. Check enum indexing.
+At initialization:
 
-7. Check WIN_NONE usage in risk arrays.
+sum weights.
 
-8. Check division-by-zero guards.
+If sum <= 0:
+disable confidence engine safely.
 
-9. Check account-currency assumptions.
+If sum != 100:
+NORMALIZE internally rather than fail the EA.
 
-10. Check price/tick normalization.
+Log:
 
-11. Check volume normalization.
+CONFIDENCE_WEIGHTS_NORMALIZED.
 
-12. Check OrderCalcProfit failure fallback.
+======================================================================
+43. SIGNAL CONFLICT HANDLING
+============================
 
-13. Check OrderCalcMargin failure fallback.
+Example:
 
-14. Check OrderCheck retcodes.
+Price Action LONG = strong
+Trend LONG = strong
+MACD LONG = strong
 
-15. Check netting behavior.
+but:
 
-16. Check hedging behavior.
+major resistance immediately overhead
+poor R:R
+spread poor.
 
-17. Check recovery behavior.
+Result:
+NO_TRADE.
 
-18. Check TP partial volume behavior.
+Confidence cannot override R:R/execution safety.
 
-19. Check restart persistence.
+Another example:
 
-20. Check dashboard compile.
+LONG confidence 79
+SHORT confidence 78.
 
-21. Check CSV FileWrite column consistency.
+Result:
+NO_TRADE due insufficient directional separation.
 
-If MetaEditor/MetaEditor64 compiler is available in the environment:
+Another:
 
-COMPILE the resulting MQ5.
+LONG=88
+SHORT=40
+HIGH_VOLATILITY
+threshold=80
+risk reduced
+R:R pass.
+
+Result:
+BUY allowed subject to all existing gates.
+
+======================================================================
+44. EXTREME VOLATILITY CLASSIFICATION
+=====================================
+
+Build on existing disorder/HV logic.
+
+Possible ingredients:
+
+ATR percentile >= high extreme threshold
+AND/OR
+candle displacement extreme
+AND/OR
+spread percentile extreme
+AND/OR
+volume extreme
+AND/OR
+slippage abnormal.
+
+Do not trigger EXTREME based on one mild indicator.
+
+Expose:
+
+input double InpExtremeATRPercentile=97.0;
+input double InpExtremeVolumePercentile=97.0;
+input double InpExtremeDisplacementATR=2.8;
+
+Reuse existing disorder spread/slippage inputs.
+
+If EXTREME:
+block NEW entries.
+
+Do not automatically flatten positions unless existing breaker logic says so.
+
+======================================================================
+45. LOW LIQUIDITY CLASSIFICATION
+================================
+
+Use combination of:
+
+very low relative volume
+very low volume percentile
+poor liquidity ratio
+potentially abnormally wide spread.
+
+Do not classify an ordinary quiet minute as permanently low liquidity.
+
+Use persistence / multi-condition confirmation.
+
+Example:
+
+InpLowLiquidityConfirmBars=2.
+
+Block new entries while confirmed.
+
+Do not disable session permanently.
+
+======================================================================
+46. SIDEWAYS CLASSIFICATION
+===========================
+
+Use evidence such as:
+
+ADX low
+EMA20/50 flat / closely compressed
+lack of HH/HL or LH/LL
+frequent VWAP crossing
+low directional structure confidence.
+
+SIDEWAYS is not necessarily complete NO_TRADE.
+
+Mean-reversion setups may still be valid.
+
+Trend-following/breakout setups require higher confidence.
+
+Use setup-aware behavior.
+
+======================================================================
+47. STRONG BULLISH / STRONG BEARISH
+===================================
+
+Do not classify only from EMA stacking.
+
+STRONG BULLISH should require a combination such as:
+
+HH/HL
+bullish BOS
+EMA alignment
+price above EMA200
+M5 trend up
+ADX/DI confirmation
+VWAP support
+volume acceptable.
+
+STRONG BEARISH symmetrical.
+
+Use a directional regime score internally rather than a single rule.
+
+======================================================================
+48. OPTIONS FAIL-OPEN
+=====================
+
+The options module must NEVER make the base EA nonfunctional by default.
+
+Default:
+
+InpUseOptionsContext=false.
+
+When enabled but stale/unavailable:
+
+if InpRequireOptionsData=false:
+remove its 5 points from possible score.
+
+Never fabricate options values.
+
+Never use stale snapshot past:
+
+InpOptionsMaxAgeSec.
+
+======================================================================
+49. DO NOT ADD NEW NETWORK DEPENDENCY UNLESS ALREADY AVAILABLE
+==============================================================
+
+Do not automatically integrate:
+
+Polygon
+Tradier
+CBOE paid endpoints
+IBKR
+third-party DLLs
+
+during this task.
+
+Create the architecture/hooks only.
+
+If an existing FMP endpoint can provide reliable Gold Futures/options data already supported by the project, it may be integrated carefully.
+
+Otherwise:
+options data stays optional placeholder interface with unavailable status.
+
+Do not hardcode credentials.
+
+======================================================================
+50. COMPILATION / FULL AUDIT
+============================
+
+After implementing:
+
+Re-read the complete file.
+
+Search for:
+
+EMA9
+EMA200
+MACD
+StructureState
+DirectionRegime
+EnvironmentRegime
+VolumePercentile
+ConfidenceBreakdown
+SignalDecision
+InpMinConfidenceScore
+BuildSignalDecision
+NetRR.
+
+Verify every function is actually called.
+
+Check:
+
+indicator handles
+INVALID_HANDLE
+CopyBuffer return counts
+array bounds
+division by zero
+enum bounds
+string sizes
+performance loops
+dashboard fields
+CSV argument count
+persistence implications
+netting/hedging behavior
+simple mode
+complex mode
+recovery mode.
+
+If MetaEditor compiler is available:
+
+COMPILE.
+
+Fix all errors.
 
 Target:
+0 errors.
 
-0 errors
-0 warnings where reasonably achievable.
+Fix warnings where reasonably possible.
 
-If the compiler is NOT available:
+If compiler is unavailable:
+perform static syntax/type/call-site audit.
 
-do NOT falsely claim successful compilation.
-
-Instead perform a complete static MQL5 syntax/type/call-site audit and state clearly that native MetaEditor compilation remains required.
-
-======================================================================
-46. DO NOT RETURN A PARTIAL PATCH
-=================================
-
-Apply all required changes directly to the EXISTING file.
-
-Do not stop after modifying only:
-
-CalculateLot
-
-or:
-
-CurrentRiskPct.
-
-Perform the entire dependency conversion.
-
-Do not leave TODO placeholders.
-
-Do not supply pseudo-code as the implementation.
-
-Do not produce a fresh simplified EA.
-
-Preserve the complete existing EA.
+Do NOT falsely claim compilation.
 
 ======================================================================
-47. REQUIRED FINAL AUDIT
-========================
+51. FINAL REGRESSION CHECKLIST
+==============================
 
-Before completing, explicitly verify internally that:
+Before completing verify:
 
-[ ] No hardcoded Simple Scalp 0.35 risk path bypasses profile engine.
-
-[ ] InpRiskPercent remains available for manual mode.
-
-[ ] InpLotSize does not affect Auto mode.
-
-[ ] Legacy 1.20 max-lot cap does not restrict Auto mode.
-
-[ ] Volume is determined by actual risk, not account-size lot tables.
-
-[ ] OrderCalcProfit is primary monetary SL-risk calculator.
-
-[ ] PriceMoveMoney remains fallback.
-
-[ ] Learned commission remains primary.
-
-[ ] Commission fallback is not converted into notional percentage.
-
-[ ] TP1/TP2/TP3 price targets remain ATR/structure based.
-
-[ ] Fixed TP MONEY viability gates are superseded by risk-relative gates.
-
-[ ] Performance gating uses rolling R in Auto mode.
-
-[ ] Native OrderCalcMargin is used.
-
-[ ] New trade requests go through OrderCheck.
-
-[ ] Existing modification/delete requests are not incorrectly blocked by new-entry preflight.
-
-[ ] Min-lot risk cannot silently exceed profile ceiling.
-
-[ ] Spread gate uses existing rolling spread statistics.
-
-[ ] Slippage gate uses existing slippage statistics.
-
-[ ] g_ptScale/price-distance normalization is consistent.
-
-[ ] SYMBOL_VOLUME_LIMIT is respected.
-
-[ ] Aggregate/directional/window risk remain percentage based.
-
-[ ] Mobile RISK override cannot bypass safety.
-
-[ ] Daily/weekly/monthly DD breakers remain intact.
-
-[ ] No martingale remains intact.
-
-[ ] No averaging down remains intact.
-
-[ ] Recovery risk remains smaller.
-
-[ ] Sydney/Tokyo/London/New York all remain available according to existing configuration.
-
-[ ] Overlap/HV engine remains intact.
-
-[ ] News protection remains intact.
-
-[ ] Swap protection remains intact.
-
-[ ] License/mobile architecture remains intact.
-
-[ ] Dashboard remains functional.
-
-[ ] Existing logs/performance metrics remain functional.
+[ ] Capital profile engine unchanged.
+[ ] Auto risk sizing unchanged.
+[ ] OrderCalcProfit logic unchanged except required integration.
+[ ] OrderCalcMargin unchanged.
+[ ] OrderCheck unchanged.
+[ ] Adaptive spread/slippage unchanged.
+[ ] Sydney works.
+[ ] Tokyo works.
+[ ] London works.
+[ ] New York works.
+[ ] Overlaps work.
+[ ] HV engine works.
+[ ] SMC works.
+[ ] FVG works.
+[ ] IFVG works.
+[ ] PTB works.
+[ ] SR works.
+[ ] VWAP works.
+[ ] Bollinger existing logic retained.
+[ ] EMA20/50 retained.
+[ ] EMA9 added.
+[ ] EMA200 added.
+[ ] MACD truly implemented.
+[ ] HH/HL/LH/LL explicitly classified.
+[ ] Volume percentile implemented.
+[ ] Volume spike state implemented.
+[ ] Direction regime implemented.
+[ ] Environment regime implemented.
+[ ] Confidence score 0-100 implemented.
+[ ] Threshold configurable.
+[ ] Missing data renormalization implemented.
+[ ] BUY/SELL/NO_TRADE centralized.
+[ ] Direction confidence gap implemented.
+[ ] Setup-specific R:R implemented.
+[ ] Universal 1:3 rule NOT introduced.
+[ ] Options context optional/fail-open.
+[ ] No ROC added.
+[ ] No duplicate Bollinger added.
+[ ] No mandatory Theta/Vega added.
+[ ] No new martingale.
+[ ] No averaging down.
+[ ] No risk-control bypass.
+[ ] Dashboard updated.
+[ ] CSV updated.
+[ ] Performance buckets added.
+[ ] Existing strategy still trades rather than being over-filtered.
 
 ======================================================================
-48. REQUIRED FINAL REPORT FROM CODEX
-====================================
+52. FINAL OUTPUT FROM CODEX
+===========================
 
-After modifying the actual MQ5 file, return a concise implementation report containing:
+Modify the EXISTING Predict-A-Trade-Ultra.mq5 directly.
 
-A. FILE MODIFIED
-exact path/file.
+Do NOT return only a patch.
 
-B. CAPITAL ENGINE
-profile thresholds and detected current profile.
+Do NOT return pseudo-code.
 
-C. RISK ENGINE
-old risk path vs new authoritative path.
+Do NOT create a replacement simplified EA.
 
-D. BROKER ENGINE
-which broker properties are now used.
+After modification provide a concise report:
 
-E. LOT SIZING
-how raw and final volume are calculated.
+A. File modified
 
-F. MARGIN ENGINE
-OrderCalcMargin integration.
+B. New functions added
 
-G. PREFLIGHT
-OrderCheck integration and exact call sites.
+C. New enums/structs
 
-H. COST ENGINE
-commission/spread/slippage behavior.
+D. New inputs
 
-I. PERFORMANCE GATING
-money expectancy → R expectancy.
+E. HH/HL/LH/LL implementation
 
-J. SMALL ACCOUNT BEHAVIOR
-exact conditions where a $50-$500 account trades or is blocked.
+F. EMA9/EMA200 integration
 
-K. BACKWARD COMPATIBILITY
-which old inputs remain and when they are ignored.
+G. MACD integration
 
-L. COMPILATION
-actual compiler result if compiler was available; otherwise state NOT COMPILED.
+H. Volume percentile/spike engine
 
-M. FINAL DIFF SUMMARY
-functions added
-functions modified
-inputs added
-structs modified.
+I. Direction regime logic
+
+J. Environment regime logic
+
+K. Confidence 0-100 architecture
+
+L. BUY/SELL/NO_TRADE decision flow
+
+M. Setup-specific R:R values
+
+N. Options/OI architecture status
+
+O. Dashboard additions
+
+P. CSV additions
+
+Q. Compilation result
+
+R. Regression confirmation that existing capital/risk/broker/session/SMC systems remain intact.
 
 ======================================================================
-FINAL PRINCIPLE
-===============
+FINAL DESIGN PRINCIPLE
+======================
 
-The SAME Predict-A-Trade-Ultra.mq5 must safely work across brokers and account sizes by calculating economic risk from the broker/account environment.
+The EA must remain SETUP-DRIVEN.
 
-It must NOT say:
+Indicators provide CONFLUENCE.
 
-"$100 uses 0.01 lot"
-"$1,000 uses 0.10"
-"$10,000 uses 1.00."
+They do NOT independently manufacture trades.
 
-It must calculate:
+The desired flow is:
 
-SAFE CAPITAL BASE
-×
-ALLOWED RISK %
-==============
+MARKET DATA
+↓
+PRICE ACTION / SMC
+↓
+SETUP DETECTION
+↓
+DIRECTION REGIME
+↓
+ENVIRONMENT REGIME
+↓
+TREND / MOMENTUM / VOLUME / VWAP / MACRO / OPTIONAL OPTIONS
+↓
+LONG CONFIDENCE
+↓
+SHORT CONFIDENCE
+↓
+BUY / SELL / NO_TRADE
+↓
+SETUP-SPECIFIC NET R:R
+↓
+EXISTING SPREAD / SLIPPAGE / NEWS / DISORDER / SESSION GATES
+↓
+EXISTING CAPITAL / RISK / MARGIN ENGINE
+↓
+OrderCheck
+↓
+OrderSend.
 
-RISK MONEY
+CONFIDENCE >= 75 is NOT sufficient by itself.
 
-then:
+A VALID SETUP must exist.
 
-REAL BROKER LOSS FROM ENTRY TO SL
-+
-EXPECTED EXECUTION COST
-=======================
+EXTREME VOLATILITY:
+NO TRADE.
 
-RISK PER LOT
+LOW LIQUIDITY:
+NO TRADE.
 
-then:
+DISORDER:
+NO TRADE.
 
-# RISK MONEY / RISK PER LOT
+HIGH VOLATILITY:
+higher confidence + reduced existing HV risk.
 
-RAW VOLUME
+SIDEWAYS:
+higher confidence for trend setups, but valid mean-reversion setups remain possible.
 
-then validate against:
+DO NOT use universal 1:3 R:R.
 
-VOLUME MIN
-VOLUME STEP
-VOLUME MAX
-VOLUME LIMIT
-AGGREGATE RISK
-DIRECTIONAL RISK
-WINDOW RISK
-MARGIN
-SPREAD
-SLIPPAGE
-COST
-ORDERCHECK.
+DO NOT duplicate existing features.
 
-Only after all checks pass:
+DO NOT weaken anything already implemented.
 
-ORDERSEND.
-
-A $50 account may correctly produce NO TRADE if the broker's minimum XAUUSD contract is economically unsafe.
-
-A $50,000+ account must be allowed to scale its broker-valid volume without being constrained by an obsolete fixed 1.20-lot ceiling.
-
-PRESERVE THE ENTIRE EXISTING TRADING STRATEGY.
-
-CHANGE ONLY WHAT IS NECESSARY TO MAKE CAPITAL, RISK, COST, MARGIN AND EXECUTION BROKER-NATIVE AND ACCOUNT-SIZE-INDEPENDENT.
+Apply all pending upgrades directly to the current production MQL5.
