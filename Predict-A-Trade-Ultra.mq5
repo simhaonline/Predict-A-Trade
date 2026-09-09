@@ -3163,7 +3163,8 @@ ENUM_SIGNAL_DECISION BuildSignalDecision(int dir,double entry,double sl,double t
       double blended=(netTP1*w1+tp2net*w2+tp3net*w3)/wsum;
       ladderNetRR=(riskMoney>0?blended/riskMoney:0);
    }
-   double netRR=(InpSimpleScalpMode?netRR:ladderNetRR);   // simple = TP1-based, ladder = weighted
+   double tp1NetRR=(riskMoney>0?netTP1/riskMoney:0);   // simple mode: full exit at TP1
+   double netRR=(InpSimpleScalpMode?tp1NetRR:ladderNetRR);   // [A1] ladder = split-weighted
    d.riskMoney=riskMoney;
    d.riskPct=(GetConservativeCapitalBase()>0?riskMoney/GetConservativeCapitalBase()*100.0:0);
    d.potentialRewardMoney=grossTP1;
@@ -5236,7 +5237,7 @@ void SaveState()
       FileWriteDouble(f,g_ps[p].entryAtrPct);FileWriteDouble(f,g_ps[p].entryVolRatio);
       FileWriteDouble(f,g_ps[p].realizedGross);FileWriteDouble(f,g_ps[p].realizedNet);FileWriteDouble(f,g_ps[p].realizedCosts);
    }
-   FileFlush(f);FileClose(f);FileMove(tmpName,StateName(),FILE_REWRITE|FILE_COMMON);   // [C6] atomic swap
+   FileFlush(f);FileClose(f);FileMove(tmpName,FILE_COMMON,StateName(),FILE_REWRITE|FILE_COMMON);   // [C6] atomic swap (src_common, dst, flags)
 }
 
 void LoadState()
@@ -5602,6 +5603,7 @@ void DashUpdate(bool force=false)
    string ovShort=(ovLONNY?"L+NY":(ovTOKLON?"T+L":(ovSYDTOK?"S+T":"--")));
    string utcHM=StringFormat("%02d:%02d",um/60,um%60);
    DashRow("L_TIME",0,yL,"OVL "+ovShort+"  SRV "+TimeToString(ServerNow(),TIME_SECONDS)+"  UTC "+utcHM,C_TXT);
+      double mid=(SymbolInfoDouble(eaSymbol,SYMBOL_BID)+SymbolInfoDouble(eaSymbol,SYMBOL_ASK))/2.0;   // [fix] scope for ATR % rows
       DashRow("L_SPRD",0,yL,"Spread "+DoubleToString(sp,0)+"pt (p"+DoubleToString(spp,0)+")",
            (spp>InpMaxSpreadPercentile?C_DN_TXT:(sp>g_lastSpreadCapPts?C_WARN_TXT:C_TXT)));
    DashRow("L_ATR",0,yL,"ATR "+DoubleToString(g_atr,2)+" (p"+DoubleToString(ap,0)+") ["+DoubleToString(mid*InpMinATRPctOfPrice/100.0,2)+".."+(InpMaxATRPctOfPrice>0?DoubleToString(mid*InpMaxATRPctOfPrice/100.0,2):"off")+"]",
