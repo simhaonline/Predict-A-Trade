@@ -452,7 +452,7 @@ input int    InpSwapBlockMinutesBefore    = 60;
 input int    InpSwapBlockMinutesAfter     = 10;
 
 input group "=== PERFORMANCE SELF-GATING / A-B ==="
-input bool   InpEnablePerformanceGating   = true;
+input bool   InpEnablePerformanceGating   = false;    // [P9] OFF during validation: window expectancy must not disable overlaps before 100 clean trades
 input int    InpPerfMinTrades             = 20;
 input int    InpPerfRollingTrades         = 40;
 input double InpDisableExpectancyMoney    = -0.20;     // LEGACY/MANUAL: money expectancy disable when InpUseRExpectancyGating=false
@@ -1480,7 +1480,7 @@ color C_SYD_DIM=C'20,60,90',C_TOK_DIM=C'50,32,90',C_LON_DIM=C'90,54,0',C_NY_DIM=
 #define L_SECTIONS 3
 #define L_ROWS     16
 #define R_SECTIONS 4
-#define R_ROWS     32      // 22 legacy + 2 SR [SR] + 4 capital-engine + 4 signal-quality rows
+#define R_ROWS     33      // 22 legacy + 2 SR [SR] + 4 capital-engine + 4 signal-quality + rejection counters
 int g_font=7,g_fontPx=9,g_dpi=96;
 double g_dpiScale=1.0;
 int g_rh=16,g_hdrH=30,g_colW=300,g_pad=12,g_gap=14,g_panelW=0;
@@ -1533,7 +1533,7 @@ double MinTradeDistance()
 //--- These are the code equivalents of the complex-mode inputs:
 //---   SCALP_TP1_ATR ~ InpTP1_ATR_Floor/Cap midpoint, SCALP_SL_ATR ~ InpSL_ATR_Multiplier.
 //--- Distance = ATR multiple (volatility-adjusted); volume split = decimal fraction (Phase 2.1).
-const double SCALP_TP1_ATR   = 0.40;   // TP1 distance (complex-mode analogue: InpTP1_ATR_Floor 0.25..Cap 0.40)
+const double SCALP_TP1_ATR   = 0.55;   // [P8] TP1 distance - post-cost viable scalp target (prompt.md #8)
 const double SCALP_TP2_TOT   = 0.75;   // TP2 distance from entry (InpTP2_ATR_Floor 0.60..Cap 1.10)
 const double SCALP_TP3_TOT   = 1.15;   // TP3 distance from entry (InpTP3_ATR_Floor 1.00..Cap 1.80)
 const double SCALP_SL_ATR    = 0.80;   // trend-pullback / momentum stop (InpSL_ATR_Multiplier)
@@ -1895,8 +1895,19 @@ void UpdateSpreadStats()
 
 double PercentileRank(const double &a[],int n,double v)
 {
-   if(n<=1) return 50.0; int le=0; for(int i=0;i<n;i++)if(a[i]<=v)le++;
-   return 100.0*le/n;
+   if(n<=1) return 50.0;
+   //--- [P1 FIX] tie-aware midpoint ranking: the old version counted values EQUAL to v,
+   //--- so a stable/fixed spread (e.g. always 35pt) ranked itself ~100th percentile and
+   //--- AdaptiveSpreadOK + the environment engine then read "wideSpread" from a normal
+   //--- feed -> ENV_LOW_LIQUIDITY -> NO TRADE indefinitely. Midpoint ties => ~50.0.
+   int less=0,equal=0;
+   double eps=1e-9*MathMax(1.0,MathAbs(v));
+   for(int i=0;i<n;i++)
+   {
+      if(a[i]<v-eps)less++;
+      else if(MathAbs(a[i]-v)<=eps)equal++;
+   }
+   return 100.0*(less+0.5*equal)/n;
 }
 
 double SpreadPercentile(){ return PercentileRank(g_spreadBuf,g_spreadCnt,SpreadPoints()); }
@@ -2491,7 +2502,11 @@ void EvaluateScalpSignal()
    if(um>=7*60&&um<=8*60+15)
    {
       // Asian range = high/low of 00:00-06:45 UTC today
-      datetime dayStart=ServerNow()-(ServerNow()%86400);
+      //--- [P7 FIX] build the UTC day start from UTCNow and convert each bar timestamp
+      //--- to UTC with g_serverOffsetSec: the old ServerNow()-day math built the wrong
+      //--- range on GMT+2/GMT+3 brokers (server midnight != UTC midnight).
+      datetime utcNow=UTCNow();
+      datetime utcDayStart=utcNow-(utcNow%86400);
       int asiaBars=(int)((6*60+45));
       double ah=0,al=0;
       MqlRates r[];
@@ -2501,8 +2516,8 @@ void EvaluateScalpSignal()
          ah=-DBL_MAX;al=DBL_MAX;
          for(int k=0;k<asiaBars;k++)
          {
-            datetime bt=(datetime)r[k].time;
-            if(bt>=dayStart&&bt<dayStart+(6*60+45)*60)
+            datetime btUTC=(datetime)((long)r[k].time-g_serverOffsetSec);
+            if(btUTC>=utcDayStart&&btUTC<utcDayStart+(6*60+45)*60)
             {ah=MathMax(ah,r[k].high);al=MathMin(al,r[k].low);}
          }
          if(ah>0&&al>0&&(ah-al)>=0.8*g_atr)   // meaningful range, not dead tape
@@ -3116,22 +3131,27 @@ double ComputeConfidence(int dir,ConfidenceBreakdown &out,string &reasonBuf,bool
       rr=0;   // assigned in BuildSignalDecision where the plan exists
    }
    //================= aggregate with missing-data renormalization (section 10) =========
-   double possible=g_wPrice+g_wTrend+g_wVolume+g_wMomentum+g_wVWAP+g_wVol+g_wMacro+g_wOptions+g_wRR;
-   if(InpUseMTFAlignment)possible+=InpMTFConfidenceBonus;   // [MTF] full-alignment bonus headroom
+   //--- [P2 FIX] possible = sum of the category MAXIMA actually reachable (90 core
+   //--- + 5 MTF bonus), minus unavailable external data. The input WEIGHTS rank the
+   //--- categories; the normalized score must measure achievement against REACHABLE
+   //--- maxima - otherwise scores are deflated by the maxima/weights mismatch.
+   double possible=20.0+15.0+15.0+10.0+10.0+10.0+10.0+5.0+5.0;   // PA trend volu mom vwap volat macro opts rr
+   if(InpUseMTFAlignment)possible+=InpMTFConfidenceBonus;
    if(InpNormalizeMissingExternalData)
    {
-      if(AvailableMacroCount()==0)possible-=g_wMacro;
-      if(!OptionsDataUsable())possible-=g_wOptions;
+      if(AvailableMacroCount()==0)possible-=10.0;
+      if(!OptionsDataUsable())possible-=5.0;
    }
    if(possible<=0)possible=1;
    double raw=price+trend+volu+mom+vwapS+volat+macro+opts+rr;
-   //--- scale raw (absolute category maxima) into the weight space, then normalize
-   double scale=possible/MathMax(1.0,(g_wPrice+g_wTrend+g_wVolume+g_wMomentum+g_wVWAP+g_wVol+g_wMacro+g_wOptions+g_wRR));
-   raw*=scale;
+   //--- [P2 FIX] no extra scaling: raw is already in category points, possible is the
+   //--- sum of AVAILABLE category maxima. The old possible/totalWeights multiplication
+   //--- canceled the denominator adjustment, so missing macro/options still dragged the
+   //--- normalized score down (the fail-open promise was void).
    out.priceAction=price;out.trend=trend;out.volumeLiquidity=volu;out.momentum=mom;
    out.vwapLocation=vwapS;out.volatility=volat;out.macro=macro;out.options=opts;out.riskReward=rr;
    out.rawScore=raw;out.possibleScore=possible;
-   out.normalizedScore=(g_weightSum>0?raw/possible*100.0:0);
+   out.normalizedScore=(possible>0.0?100.0*raw/possible:0.0);   // [P2 FIX] normalize by AVAILABLE maxima only
    return out.normalizedScore;
 }
 
@@ -4771,8 +4791,11 @@ void TryArm()
       }
    }
    else BuildThreeTargets(dir,pending,sl,lots,w,hv,t1,t2,t3);
-   // [SR] entry gate before order dispatch for the complex branch as well
-   {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){g_gateReason=srWhy2;GateHist(srWhy2);return;}}   // TryArm is void
+   //--- [P4 FIX] SR entry veto applies ONLY to the complex branch: simple mode already
+   //--- passed the CanEnter SR check and SR is advisory-by-default - the duplicate call
+   //--- here vetoed generated scalps a second time near zones.
+   if(!InpSimpleScalpMode)
+   {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){g_gateReason=srWhy2;GateHist(srWhy2);return;}}
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
    if(!InpSimpleScalpMode){
    if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";GateHist("TP2 R:R below floor");return;}
@@ -5766,6 +5789,21 @@ void DashUpdate(bool force=false)
       DashRow("R_VOL",1,yR,volLine,C_TXT2);
       double spATR=(g_atr>0?sp*broker.point/g_atr*100.0:0);
       DashRow("R_ADAPT",1,yR,"Sprd/ATR "+DoubleToString(spATR,1)+"%  Dev "+IntegerToString(AdaptiveDeviationPoints())+"pt  Chk "+(g_lastOrderCheckRetcode==0?"OK":IntegerToString(g_lastOrderCheckRetcode)),C_TXT2);
+      //--- [P10] live rejection counters: top gate reasons this session (no guessing)
+      if(g_gateHistN>0)
+      {
+         string top="";long topC=0;int a1=0;
+         for(int hh=0;hh<g_gateHistN&&hh<3;hh++)
+         {
+            long best=-1;int bi=0;
+            for(int hh2=0;hh2<g_gateHistN;hh2++){bool used=false;for(int hh3=0;hh3<hh;hh3++)if(g_gateHistNames[hh3]==g_gateHistNames[hh2])used=true;if(!used&&g_gateHistCounts[hh2]>best){best=g_gateHistCounts[hh2];bi=hh2;}}
+            if(best<0)break;
+            top+=(a1>0?" | ":"")+g_gateHistNames[bi]+" "+IntegerToString(g_gateHistCounts[bi]);
+            a1++;
+         }
+         DashRow("R_REJ",1,yR,"Rejections: "+top,C_WARN_TXT);
+      }
+      else DashRow("R_REJ",1,yR,"Rejections: none yet",C_DIM);
       //--- [SIGNAL QUALITY] compact telemetry (section 33): cached values only
       string decTxt=(g_lastDecision.decision==SIGNAL_BUY?"BUY":(g_lastDecision.decision==SIGNAL_SELL?"SELL":"NO TRADE"));
       color decCol=(g_lastDecision.decision==SIGNAL_BUY?C_UP_TXT:(g_lastDecision.decision==SIGNAL_SELL?C_DN_TXT:C_DIM));
