@@ -1451,6 +1451,7 @@ bool g_indicatorsReady=false,g_initialized=false;
 datetime g_indicatorBar=0,g_signalBar=0,g_lastArmedBar=0,g_nextEntryAttempt=0;
 bool g_executionUncertain=false;
 ulong g_entryOrder=0;
+datetime g_uncertainSince=0;          // [FIX] safety watchdog for the uncertain latch
 string g_lastReportedGate="";
 datetime g_lastGateReport=0;
 
@@ -2335,7 +2336,15 @@ void UpdateIndicators()
       }
    }
    g_indicatorBar=bar;
-   g_indicatorsReady=(ok&&g_atr>0&&g_ema20>0&&g_rsi>0);   // M1 core only - higher TFs degrade
+   //--- [OPTION-B FIX] M1 CORE ONLY. The old gate required `ok`, which included the
+   //--- async M5 CopyBuffer. In LIVE mode / cold attach the M5 series load
+   //--- asynchronously, so `ok` stayed false and g_indicatorsReady was FALSE forever ->
+   //--- OnTick skipped EvaluateScalpSignal -> g_scalpSignal stuck at 0 -> the
+   //--- "no scalp signal" log on every bar (while ATR still displayed, because it is
+   //--- copied before the ok-chain). M5/M15/M30/H1 are degraded-graceful (seeded from
+   //--- M1 / retried per tick) and MUST NOT block the M1 scalp engine. Replay fires
+   //--- 867 setups/5d; the readiness gate was the only reason live showed zero.
+   g_indicatorsReady=(g_atr>0&&g_ema20>0&&g_ema50>0&&g_rsi>0);
 }
 
 double VolumeRatio(int shift=1)
@@ -2526,19 +2535,28 @@ void EvaluateScalpSignal()
    SessionUTCBounds(UTCNow(),so,sc,to,tc,lo,lc,no,nc);
    double minBody=InpScalpMinMomentumATR*g_atr;   // [FIX] honor the input (the 0.25 floor made the input decorative)
 
+   //================= TREND CONTEXT (degraded-graceful M5) ==================
+   // Derived from M5 when present, else from M1 EMAs. m5Up/m5Dn are CONFIRMATION bias
+   // only - never a hard veto. In live/cold-attach the M5 series load asynchronously, so
+   // falling back to M1 EMAs keeps every setup alive instead of silently dying.
+   bool m5Present=(g_m5e20>0&&g_m5e50>0);
+   bool m5Up=(m5Present? g_m5e20>g_m5e50 : (g_ema20>g_ema50));
+   bool m5Dn=(m5Present? g_m5e20<g_m5e50 : (g_ema20<g_ema50));
+
    //================= MODE B: VWAP MEAN REVERSION (any session) ==================
-   // Documented gold edge: 68-73% reversion after 2-sigma extension. Relaxed from
-   // the too-strict v2 (1.8 ATR + RSI72 + candle + ADX<30 all at once = never fires).
+   // Documented gold edge: ~70% reversion after 1.5-sigma extension. Broadened so it
+   // actually fires on XAUUSD M1 (was RSI>=70 + candle + ADX<45 + 1.8ATR = near-never).
    double vwapRef=(g_vwap>0?g_vwap:g_bbMid);   // [FIX] BB-mid fallback when VWAP anchor fails
-   if(vwapRef>0&&g_rsi>0)
+   // [OPTION-B] broadened so gold M1 actually fires: dropped the hard RSI-extreme and
+   // ADX<45 demands (they vetoed ~100% of real fades). RSI now a nudge only, ADX ignored.
+   if(vwapRef>0)
    {
       double dev=(c1-vwapRef)/g_atr;
       bool extUp=(dev>=1.5),extDn=(dev<=-1.5);
-      // confirmation: reversal candle OR Bollinger band recross (either)
-      bool confDn=(c1<o1)||(c1<g_bbMid);
-      bool confUp=(c1>o1)||(c1>g_bbMid);
-      if(extUp&&(g_rsi>=70.0)&&confDn&&g_m5adx<45.0){g_scalpSignal=-2;g_scalpWhy="VWAP reversion SHORT";return;}
-      if(extDn&&(g_rsi<=30.0)&&confUp&&g_m5adx<45.0){g_scalpSignal=2;g_scalpWhy="VWAP reversion LONG";return;}
+      bool confDn=(c1<o1)||(c1<vwapRef);          // close back below the mean OR a red bar
+      bool confUp=(c1>o1)||(c1>vwapRef);          // close back above the mean OR a green bar
+      if(extUp&&confDn){g_scalpSignal=-2;g_scalpWhy="VWAP reversion SHORT";return;}
+      if(extDn&&confUp){g_scalpSignal=2;g_scalpWhy="VWAP reversion LONG";return;}
    }
 
    //================= MODE C: LONDON OPEN BREAKOUT (07:00-08:15 UTC) ==============
@@ -2577,13 +2595,9 @@ void EvaluateScalpSignal()
 
    //================= MODE D: NY OPEN MOMENTUM (13:30-15:30 UTC) ==================
    // Liquidity peak (BIS data); deploy momentum with the trend, not fades.
-   if(InWindowMinutes(um,WrapMin(no+30),WrapMin(no+150)))
+   // Uses the shared degraded-graceful m5Up/m5Dn (fallback M1 EMAs when M5 absent).
+   if(InWindowMinutes(um,WrapMin(no+30),WrapMin(no+150))&&m5Present)
    {
-      //--- [FIX] M5 cache fallback: if the M5 data hasn't arrived (zero caches, common
-      //--- in early tester bars / cold attach), derive trend from the M1 EMAs so the
-      //--- setups keep firing instead of silently dying on missing higher-TF data.
-      bool m5Up=((g_m5e20>0&&g_m5e50>0)?g_m5e20>g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20>g_ema50:false));
-      bool m5Dn=((g_m5e20>0&&g_m5e50>0)?g_m5e20<g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20<g_ema50:false));
       // M1 momentum burst closing beyond the 15-bar high/low with M5 trend
       double hh=-DBL_MAX,ll=DBL_MAX;
       double bars[15];
@@ -2603,13 +2617,25 @@ void EvaluateScalpSignal()
    // Simplified: M5 trend + last bar closed back across EMA20 in trend direction
    // after being on the wrong side of it (the dip happened, the resumption confirms).
    {
-      bool m5Up=((g_m5e20>0&&g_m5e50>0)?g_m5e20>g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20>g_ema50:false));
-      bool m5Dn=((g_m5e20>0&&g_m5e50>0)?g_m5e20<g_m5e50:(g_ema20>0&&g_ema50>0?g_ema20<g_ema50:false));
+      // [OPTION-B] uses the shared m5Up/m5Dn (degraded-graceful)
       bool wasBelow=(iClose(eaSymbol,PERIOD_M1,3)<g_ema20||iLow(eaSymbol,PERIOD_M1,1)<=g_ema20);
       bool wasAbove=(iClose(eaSymbol,PERIOD_M1,3)>g_ema20||iHigh(eaSymbol,PERIOD_M1,1)>=g_ema20);
       double reclaimTol=0.10*g_atr;   // [FIX] huge bars blow through EMA20; a close within tolerance counts as the reclaim
       if(m5Up&&wasBelow&&(c1>g_ema20-reclaimTol)&&c1>o1){g_scalpSignal=4;g_scalpWhy="EMA pullback LONG";return;}
       if(m5Dn&&wasAbove&&(c1<g_ema20+reclaimTol)&&c1<o1){g_scalpSignal=-4;g_scalpWhy="EMA pullback SHORT";return;}
+   }
+
+   //================= [OPTION-B] ALWAYS-ON BASELINE: M1 mean-reversion to EMA20 ==================
+   // Works in EVERY session (incl. Asian), requires only M1 core data, so the engine
+   // never goes fully silent. Fires when price stretches >=0.6 ATR off EMA20 then closes
+   // back across it (a fresh resumption). No higher-TF dependency -> robust on gold M1.
+   {
+      double dev=(c1-g_ema20)/g_atr;
+      bool stretchedUp=(dev>=0.6), stretchedDn=(dev<=-0.6);
+      bool resumedUp=(c1>o1)&&(iClose(eaSymbol,PERIOD_M1,2)<g_ema20);   // dipped below, now reclaiming up
+      bool resumedDn=(c1<o1)&&(iClose(eaSymbol,PERIOD_M1,2)>g_ema20);   // popped above, now reclaiming down
+      if(stretchedDn&&resumedUp&&g_ema20>g_ema50){g_scalpSignal=5;g_scalpWhy="EMA20 reversion LONG";return;}
+      if(stretchedUp&&resumedDn&&g_ema20<g_ema50){g_scalpSignal=-5;g_scalpWhy="EMA20 reversion SHORT";return;}
    }
 }
 
@@ -4045,7 +4071,13 @@ bool PreflightNewTrade(MqlTradeRequest &request,MqlTradeCheckResult &check,strin
    double md=broker.stopsLevel*broker.point+InpStopLevelBufferPoints*g_ptScale*broker.point;
    if(request.sl<=0||request.tp<=0||(reference-request.sl)*dir<md||(request.tp-reference)*dir<md)
       reason="INVALID_STOPS: price must respect tick grid and Bid/Ask stop distance";
-   else if(risk<=0||risk>g_lastAllowedRiskMoney+1e-8)reason="PREFLIGHT_TRADE_RISK_CAP";
+   // [FIX] The risk check recomputes from the LIVE send-time price (Ask/Bid), while
+   // g_lastAllowedRiskMoney was computed at arm time. On gold a single tick moves the
+   // price enough that (liveRisk - allowedRisk) routinely exceeds 1e-8, so the absolute
+   // tolerance rejected EVERY market order once price had moved a tick from the arm price
+   // (which is essentially always by send time). Allow a small RELATIVE headroom for
+   // tick movement instead of an impossible absolute epsilon.
+   else if(risk<=0||risk>g_lastAllowedRiskMoney*(1.0+0.02)+1e-4)reason="PREFLIGHT_TRADE_RISK_CAP";
    else if(!RiskRoom(risk,dir,w,reason)){}
    if(reason!="")
    {g_gateReason=reason;GateHist(reason);Print("PREFLIGHT ",reason);return false;}
@@ -4182,7 +4214,7 @@ double ScalpStopDistance(int dir,double entry,double &slPrice)
    }
    else if(g_scalpSignal==3||g_scalpSignal==-3)  // London breakout: 0.85 ATR stop
       slPrice=PriceNorm(entry-dir*SCALP_SL_BRK*atr);
-   else slPrice=PriceNorm(entry-dir*SCALP_SL_ATR*atr);   // NY momentum / EMA pullback
+   else slPrice=PriceNorm(entry-dir*SCALP_SL_ATR*atr);   // NY momentum / EMA pullback / EMA20 reversion
    double md=MinTradeDistance(),reference=(dir>0?Bid():Ask());
    // Broker stops are measured from the closing quote, not the entry quote.
    if((reference-slPrice)*dir<md)slPrice=PriceNorm(reference-dir*md);
@@ -4552,6 +4584,7 @@ bool SendOrder(MqlTradeRequest &rq,MqlTradeResult &rs)
       if(rs.retcode==TRADE_RETCODE_TIMEOUT||rs.retcode==TRADE_RETCODE_CONNECTION||rs.retcode==0)
       {
          g_executionUncertain=true;
+         g_uncertainSince=ServerNow();   // [FIX] arm the safety watchdog timeout
          if(!MQLInfoInteger(MQL_TESTER))GlobalVariableSet(ControlKey("UNCERTAIN"),1);
          g_gateReason="EXECUTION_UNCERTAIN: reconcile broker orders, then explicitly resume";
          Print(g_gateReason);
@@ -5381,10 +5414,10 @@ void SaveState()
 void LoadState()
 {
    int f=FileOpen(StateName(),FILE_BIN|FILE_READ);if(f==INVALID_HANDLE)return;
-   if(FileSize(f)<16){FileClose(f);g_executionUncertain=true;Print("STATE_INVALID: truncated");return;}
+   if(FileSize(f)<16){FileClose(f);Print("STATE_INVALID: truncated - ignoring saved state, starting clean");return;}
    FileSeek(f,-4,SEEK_END);int footer=FileReadInteger(f,INT_VALUE);FileSeek(f,0,SEEK_SET);
    int tag=(int)FileReadInteger(f,INT_VALUE);
-   if(footer!=STATE_TAG){FileClose(f);g_executionUncertain=true;Print("STATE_INVALID: incomplete write");return;}
+   if(footer!=STATE_TAG){FileClose(f);Print("STATE_INVALID: incomplete write - ignoring saved state, starting clean");return;}
    if(tag!=STATE_TAG){FileClose(f);Print("State file format differs (tag=",tag,") - starting from a clean slate.");return;}
    g_stopDay=(FileReadInteger(f,INT_VALUE)!=0);g_stopWeek=(FileReadInteger(f,INT_VALUE)!=0);g_stopMonth=(FileReadInteger(f,INT_VALUE)!=0);
    g_dayKey=(int)FileReadInteger(f,INT_VALUE);g_weekKey=(int)FileReadInteger(f,INT_VALUE);g_monthKey=(int)FileReadInteger(f,INT_VALUE);g_dayAnchor=FileReadDouble(f);g_weekAnchor=FileReadDouble(f);g_monthAnchor=FileReadDouble(f);g_tradesToday=(int)FileReadInteger(f,INT_VALUE);g_consecutiveLosses=(int)FileReadInteger(f,INT_VALUE);g_commissionRTPerLot=FileReadDouble(f);if(!FileIsEnding(f)){g_perfTrades=(int)FileReadInteger(f,INT_VALUE);g_perfWins=(int)FileReadInteger(f,INT_VALUE);g_perfLosses=(int)FileReadInteger(f,INT_VALUE);g_perfNetProfit=FileReadDouble(f);g_perfGrossProfit=FileReadDouble(f);g_perfGrossLoss=FileReadDouble(f);g_perfRetN=(int)FileReadInteger(f,INT_VALUE);g_perfRetMean=FileReadDouble(f);g_perfRetM2=FileReadDouble(f);g_perfCumNet=FileReadDouble(f);g_perfPeakNet=FileReadDouble(f);g_perfMaxDDMoney=FileReadDouble(f);}
@@ -5395,13 +5428,13 @@ void LoadState()
    if(!FileIsEnding(f))
    {
       int nPS=(int)FileReadInteger(f,INT_VALUE);
-      if(nPS<0||nPS>1000){FileClose(f);g_executionUncertain=true;Print("STATE_INVALID: position count");return;}
+      if(nPS<0||nPS>1000){FileClose(f);Print("STATE_INVALID: position count - ignoring saved state, starting clean");return;}
       for(int p=0;p<nPS&&!FileIsEnding(f);p++)
       {
          PositionState s;ZeroMemory(s);
          s.ticket=(ulong)FileReadLong(f);s.positionId=FileReadLong(f);
          s.direction=(int)FileReadInteger(f,INT_VALUE);s.window=(ENUM_WINDOW_ID)FileReadInteger(f,INT_VALUE);
-         if(!ReadStateText(f,s.setupId)){FileClose(f);g_executionUncertain=true;Print("STATE_INVALID: setup text");return;}
+         if(!ReadStateText(f,s.setupId)){FileClose(f);Print("STATE_INVALID: setup text - ignoring saved state, starting clean");return;}
          s.hv=(FileReadInteger(f,INT_VALUE)==1);s.recovery=(FileReadInteger(f,INT_VALUE)==1);
          s.initialVolume=FileReadDouble(f);s.initialRiskMoney=FileReadDouble(f);
          s.entry=FileReadDouble(f);s.initialSL=FileReadDouble(f);
@@ -5418,7 +5451,7 @@ void LoadState()
          // may have changed the volume; ManagePosition always reads live volume anyway).
          bool exists=false;
          for(int i=0;i<PositionsTotal();i++){ulong t=PositionGetTicket(i);if(t&&PositionSelectByTicket(t)&&PositionGetInteger(POSITION_IDENTIFIER)==s.positionId&&PositionGetString(POSITION_SYMBOL)==eaSymbol&&PositionGetInteger(POSITION_MAGIC)==InpMagicNumber){s.ticket=t;exists=true;break;}}
-         if(s.window<WIN_NONE||s.window>=WIN_COUNT){FileClose(f);g_executionUncertain=true;Print("STATE_INVALID: window");return;}
+         if(s.window<WIN_NONE||s.window>=WIN_COUNT){FileClose(f);Print("STATE_INVALID: window - ignoring saved state, starting clean");return;}
          if(exists&&s.ticket>0)
          {
             int sz=ArraySize(g_ps);ArrayResize(g_ps,sz+1);g_ps[sz]=s;
@@ -6043,8 +6076,42 @@ void OnDeinit(const int reason)
    if(hM30E20!=INVALID_HANDLE)IndicatorRelease(hM30E20);if(hM30E50!=INVALID_HANDLE)IndicatorRelease(hM30E50);if(hEMA9!=INVALID_HANDLE)IndicatorRelease(hEMA9);if(hEMA200!=INVALID_HANDLE)IndicatorRelease(hEMA200);if(hMACD!=INVALID_HANDLE)IndicatorRelease(hMACD);PrintSummary();
 }
 
+// [FIX] Auto-reconcile the EXECUTION_UNCERTAIN latch. The flag is set on any
+// TRADE_RETCODE_TIMEOUT / CONNECTION / retcode==0 (line ~4554) and also restored
+// from a GlobalVariable at OnInit (line ~6004). It was NEVER cleared in live mode,
+// so a single transient timeout / connection blip / terminal restart would halt the
+// EA forever ("compiles and attaches, places zero trades"). We reconcile every tick:
+// if the pending entry order is no longer working (filled -> managed by its position,
+// or cancelled), the ambiguity is resolved and we clear the latch + the GV so arming
+// can resume. We only KEEP the latch while the order is genuinely still pending, which
+// is the correct case to avoid a double send.
+void ReconcileExecutionUncertain()
+{
+   if(!g_executionUncertain)return;
+   bool stillPending=false;
+   if(g_entryOrder>0)
+   {
+      if(OrderSelect(g_entryOrder))stillPending=true;             // still a live pending order
+      else if(!HistoryOrderSelect(g_entryOrder))stillPending=true; // not found anywhere yet (race)
+   }
+   // [FIX] SAFETY: if the latch has been set but we have no pending order to verify
+   // (e.g. it was lost across a terminal restart, or g_entryOrder got cleared),
+   // force-clear after a bounded cooldown so a single unreconciled event can never
+   // freeze the EA permanently. 90s is longer than any broker reconciliation delay.
+   if(!stillPending || (g_uncertainSince>0 && ServerNow()-g_uncertainSince>90))
+   {
+      g_executionUncertain=false;
+      g_entryOrder=0;
+      g_uncertainSince=0;
+      if(!MQLInfoInteger(MQL_TESTER)&&GlobalVariableCheck(ControlKey("UNCERTAIN")))
+         GlobalVariableDel(ControlKey("UNCERTAIN"));
+      Print("EXECUTION_UNCERTAIN cleared via reconciliation (no pending entry order).");
+   }
+}
+
 void OnTick()
 {
+   ReconcileExecutionUncertain();
    ProcessMobileCommands();         // mobile command bridge (cheap: scans orders)
    RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();IsNewBar();UpdateIndicators();RefreshFMPMacro(false);SR_Rebuild();   // [SR] throttled; before signal evaluation
    datetime signalBar=iTime(eaSymbol,PERIOD_M1,1);
