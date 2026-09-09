@@ -1211,6 +1211,7 @@ datetime g_nextLicenseCheck    = 0;
 datetime g_gracePeriodDeadline = 0;
 string   g_machineId           = "";
 int      g_licenseEndpoint     = 0;     // 0=auto, 1=primary last OK, 2=backup last OK
+int      g_lastNonHTTPStatus   = 0;     // last non-HTTP status seen this poll (1009/1001/1003 middlebox class)
 string   g_licenseLastReason   = "";   // last validation reason (panel/CSV)
 
 //--- Phase 2.3: stable machine fingerprint = SHA256(computer|datapath|login|server).
@@ -1400,7 +1401,7 @@ int LicenseHttpPost(string endpoint,string payload,string &response)
             // Not a valid HTTP status (e.g. 1009): the Go server cannot emit one, so a
             // middlebox answered - AV HTTPS-scanner, system proxy, captive portal - or
             // the connection was cut mid-response.
-            Print("LICENSE: ",url," answered with non-HTTP status ",code," - middlebox or unstable path; failing over immediately");
+            g_lastNonHTTPStatus=code;
             break;   // edge-specific failure: same-edge retry would hit the same path - switch endpoint NOW
          }
          if(code==429)
@@ -1418,6 +1419,10 @@ int LicenseHttpPost(string endpoint,string payload,string &response)
          return code;
       }
    }
+   // every endpoint failed - one compact summary (both non-HTTP statuses if seen)
+   if(g_lastNonHTTPStatus>0)
+      Print("LICENSE: transport degraded (last non-HTTP status ",g_lastNonHTTPStatus,", Cloudflare edge or middlebox) - both endpoints tried, grace period covers trading; next poll retries");
+   g_lastNonHTTPStatus=0;
    return 0;   // every endpoint failed - caller applies the grace-period logic
 }
 
@@ -1429,7 +1434,14 @@ bool LicenseActivate()
                   ",\"broker_server\":\""+AccountInfoString(ACCOUNT_SERVER)+"\"}";
    string resp="";
    int code=LicenseHttpPost("/v1/activate",payload,resp);
-   if(code!=200)return false;   // transport failure -> caller handles grace
+   if(code!=200)
+   {
+      // Transport failure (1009/1001/1003 class) at INIT is fatal for a fresh attach:
+      // one bounded second pass after a short settle usually lands on the healthy edge.
+      Sleep(2000);
+      code=LicenseHttpPost("/v1/activate",payload,resp);
+      if(code!=200)return false;   // caller handles grace/INIT semantics
+   }
    string v=LicenseJsonField(resp,"valid");
    g_licenseLastReason=LicenseJsonField(resp,"reason");
    if(v!="true")
