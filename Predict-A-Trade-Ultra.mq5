@@ -172,7 +172,7 @@ input bool   InpAutoRiskSizing            = true;      // FALSE = legacy: InpLot
 input bool   InpUseAbsoluteLotEmergencyCap= false;     // legacy 1.20-lot cap only when TRUE + AutoRiskSizing
 input double InpEmergencyMaxTotalLots     = 0.0;       // emergency absolute lot ceiling (0 = disabled)
 input double InpRiskFloorPct              = 0.10;      // absolute risk floor AFTER modifiers; never above profile base
-input double InpMinTP1NetRiskPct          = 10.0;      // TP1 net-profit viability = % of INITIAL TRADE RISK (Auto mode)
+input double InpMinTP1NetRiskPct          = 5.0;       // TP1 net must exceed this % of the SL loss (tie-breaker; costs already netted)
 input double InpMinTP2NetRiskPct          = 20.0;      // TP2 viability = % of initial trade risk
 input double InpMinTP3NetRiskPct          = 30.0;      // TP3 viability = % of initial trade risk
 input bool   InpUseRiskRelativeNetProfitGate = true;   // FALSE = legacy fixed-money gates (InpMinNetProfitTP*Money)
@@ -1433,6 +1433,7 @@ datetime g_lastOffsetRefresh=0,g_lastBar=0,g_lastExitTime=0,g_lastEntryTime=0;
 double g_armTp1=0,g_armTp2=0,g_armTp3=0;bool g_armValid=false;
 datetime g_newsChecked=0,g_nextNewsTime=0,g_newsBlockedUntil=0,g_disorderUntil=0;
 int      g_disorderFreezeSecondsToday=0;   // [B7] daily freeze budget
+int      g_mtfAligned=0;                    // [MTF-Soft] higher-TF stacks agreeing with the current candidate
 string g_nextNewsName="",g_gateReason="";
 bool g_newsBlocked=false,g_paused=false;
 
@@ -2983,13 +2984,15 @@ double ComputeConfidence(int dir,ConfidenceBreakdown &out,string &reasonBuf,bool
       bool hBull=(g_h1e20>g_h1e50&&g_m15e20>g_m15e50),hBear=(g_h1e20<g_h1e50&&g_m15e20<g_m15e50);
       if(bullish&&hBull){trend+=3;reasonBuf+="H1_M15_UP ";}
       if(!bullish&&hBear){trend+=3;reasonBuf+="H1_M15_DN ";}
-      //--- [MTF] full M15/M30/H1 alignment bonus (the gate already required the minimum)
+      //--- [MTF-Soft] graded: +bonus per aligned stack, penalty when majority opposes
       if(InpUseMTFAlignment)
       {
          int upStacks=((g_m15e20>g_m15e50)?1:0)+((g_m30e20>g_m30e50)?1:0)+((g_h1e20>g_h1e50)?1:0);
          int dnStacks=((g_m15e20<g_m15e50)?1:0)+((g_m30e20<g_m30e50)?1:0)+((g_h1e20<g_h1e50)?1:0);
-         if(bullish&&upStacks==3){trend+=InpMTFConfidenceBonus;reasonBuf+="MTF_FULL_UP ";}
-         if(!bullish&&dnStacks==3){trend+=InpMTFConfidenceBonus;reasonBuf+="MTF_FULL_DN ";}
+         int alignedFor=(bullish?upStacks:dnStacks);
+         int alignedAgainst=(bullish?dnStacks:upStacks);
+         trend+=InpMTFConfidenceBonus*alignedFor-0.5*InpMTFConfidenceBonus*alignedAgainst;
+         reasonBuf+="MTF"+IntegerToString(alignedFor)+"/3 ";
       }
       trend=MathMin(trend,20.0);
    }
@@ -4417,15 +4420,15 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       int want=(g_scalpSignal>0?1:-1);
       if(g_scalpSignal==0||want!=dir){why="no scalp signal ("+g_scalpWhy+")";return false;}
       setup=g_scalpWhy;
-      //--- [MTF] higher-timeframe trend alignment (M15/M30/H1): count stacks agreeing
-      //--- with the trade direction. InpMTFMinAligned=0 disables the gate entirely.
-      if(InpUseMTFAlignment&&InpMTFMinAligned>0)
+      //--- [MTF-Soft] higher-TF stacks act through the confidence score (bonus/penalty),
+      //--- NOT as a hard veto: an M1 setup with 0/3 alignment still trades (smaller
+      //--- confidence), one with 3/3 gets the full bonus. The market decides, not a gate.
+      g_mtfAligned=0;
+      if(InpUseMTFAlignment)
       {
-         int aligned=0,checked=0;
-         if(g_m15e20>0&&g_m15e50>0){checked++;if((dir>0&&g_m15e20>g_m15e50)||(dir<0&&g_m15e20<g_m15e50))aligned++;}
-         if(g_m30e20>0&&g_m30e50>0){checked++;if((dir>0&&g_m30e20>g_m30e50)||(dir<0&&g_m30e20<g_m30e50))aligned++;}
-         if(g_h1e20>0&&g_h1e50>0){checked++;if((dir>0&&g_h1e20>g_h1e50)||(dir<0&&g_h1e20<g_h1e50))aligned++;}
-         if(aligned<InpMTFMinAligned){why="MTF alignment "+IntegerToString(aligned)+"/"+IntegerToString(checked)+"<"+IntegerToString(InpMTFMinAligned);return false;}
+         if((dir>0&&g_m15e20>g_m15e50)||(dir<0&&g_m15e20<g_m15e50))g_mtfAligned++;
+         if((dir>0&&g_m30e20>g_m30e50)||(dir<0&&g_m30e20<g_m30e50))g_mtfAligned++;
+         if((dir>0&&g_h1e20>g_h1e50)||(dir<0&&g_h1e20<g_h1e50))g_mtfAligned++;
       }
       // Momentum modes need liquid hours; reversion works everywhere (range fades).
       bool liquid=(w==WIN_TOKYO_LONDON||w==WIN_LONDON_NY||w==WIN_LONDON_OPEN||w==WIN_NY_OPEN
@@ -4773,7 +4776,13 @@ void TryArm()
    {
       double minTP1=MathMax(broker.stopsLevel*broker.point+InpStopLevelBufferPoints*g_ptScale*broker.point,
                             (SpreadPoints()+ExpectedSlippagePoints())*broker.point*InpTP1SpreadMultiple);
-      if(g_atr>0&&MathAbs(t1-entry0)<minTP1){g_gateReason="TP1_TOO_TIGHT";return;}
+      //--- [de-clog] veto only when TP1 violates the BROKER's own minimum (stops level).
+      //--- The spread-multiple half is already enforced economically by TP_NET_RISK
+      //--- (net must exceed 5% of SL loss) - vetoing twice double-blocks wide-spread
+      //--- brokers whose compensated TP1 is legitimately spread-adjacent.
+      if(g_atr>0&&SpreadPoints()*broker.point>0&&
+         MathAbs(t1-entry0)<broker.stopsLevel*broker.point+InpStopLevelBufferPoints*g_ptScale*broker.point)
+      {g_gateReason="TP1_TOO_TIGHT";return;}
    }
    //--- [SIGNAL QUALITY] centralized confidence/regime decision (prompt.md sections 8-15).
    //--- Setup already exists (setup-driven); the confidence engine classifies and may veto.
