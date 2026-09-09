@@ -11,9 +11,9 @@ services:
       redis:
         condition: service_started
     ports:
-      - "127.0.0.1:8080:8080"   # loopback only; TLS proxy fronts this
+      - "152.53.67.111:12312:8080" # bind real IP: Plesk (159.195.54.152) proxies to this host - loopback unreachable from there
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "--header", "X-Healthcheck: 1", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 3s
       retries: 3

@@ -28,31 +28,45 @@ Data flow rules:
   PostgreSQL is hit on cache miss and for seat bookkeeping.
 - `WebRequest` in the EA happens **only inside `OnTimer()`** — never in the tick path.
 
-## 2. Server deployment (docker-compose)
+## 2. Server deployment (docker-compose) — LIVE since 2026-09-09
+
+Production: `https://license.predictatrade.com` → Plesk nginx (159.195.54.152,
+TLS termination, Let's Encrypt cert valid to Dec 2026) → proxies to this
+backend host **152.53.67.111:12312** (docker compose in `license-server/`).
+The backend binds the real IP because Plesk is a separate machine — a
+loopback bind would be unreachable from there.
 
 ```bash
 cd license-server
 cp .env.example .env         # set DATABASE_URL, POSTGRES_PASSWORD, Stripe secrets
-docker compose up -d         # api + redis + postgres; migrations apply on first boot
-curl http://localhost:8080/healthz
+docker compose --env-file .env up -d --build   # api + redis + postgres; migrations apply on first boot
+curl -H 'X-Healthcheck: 1' http://152.53.67.111:12312/healthz
 ```
 
 Front the API with TLS (required in production — the API rejects plain HTTP unless
 `APP_ENV=development` or the request carries `X-Forwarded-Proto: https`):
 
 ```nginx
-server {
-  listen 443 ssl;
-  server_name api.yourdomain.com;
-  location / { proxy_pass http://127.0.0.1:8080; proxy_set_header X-Forwarded-Proto https; }
+# On the Plesk server — vhost license.predictatrade.com, Additional nginx directives
+location / {
+  proxy_pass http://152.53.67.111:12312;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Proto https;
+  proxy_set_header X-Real-IP $remote_addr;
 }
 ```
+
+Health check: `GET /healthz` (bypasses the HTTPS guard; docker healthcheck sends
+`X-Healthcheck: 1`).
+
+License administration (issue/list/revoke keys without Stripe):
+`python3 tools/license_admin.py create|list|revoke|events`.
 
 Verify: `go test ./...` (routing, HTTPS enforcement, headers, key format), `go vet ./...`.
 
 ## 3. Stripe integration
 
-1. Dashboard → Developers → Webhooks → add endpoint: `https://api.yourdomain.com/v1/webhook/stripe`.
+1. Dashboard → Developers → Webhooks → add endpoint: `https://license.predictatrade.com/v1/webhook/stripe`.
 2. Subscribe to `checkout.session.completed` and `customer.subscription.deleted`.
 3. Put the signing secret into `STRIPE_WEBHOOK_SECRET` in `.env`.
 4. The handler verifies the `Stripe-Signature` HMAC (v1 scheme, 5-min tolerance), then:
@@ -67,7 +81,7 @@ Verify: `go test ./...` (routing, HTTPS enforcement, headers, key format), `go v
 1. Load a preset (e.g. `XAUUSD_M1_UltraScalp_Licensed.set`).
 2. Enter the purchased key into `InpLicenseKey`.
 3. Tools → Options → Expert Advisors → **Allow WebRequest for listed URL** → add the
-   server base URL (e.g. `https://api.yourdomain.com`). Without this the EA logs the
+   server base URL (e.g. `https://license.predictatrade.com`). Without this the EA logs the
    4014 fix hint and cannot reach the server.
 4. Attach to an XAUUSD M1 chart. First validation happens in `OnInit`; failure without
    an active grace period refuses to start (`INIT_FAILED`).

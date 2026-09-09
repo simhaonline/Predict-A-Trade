@@ -88,7 +88,7 @@ go test ./...           # routing/HTTPS/header smoke tests
 ```
 
 Wire Stripe webhooks (`checkout.session.completed`,
-`customer.subscription.deleted`) to `https://api.yourdomain.com/v1/webhook/stripe`;
+`customer.subscription.deleted`) to `https://license.predictatrade.com/v1/webhook/stripe`;
 keys are issued, hashed, and emailed automatically. Details:
 `license-server/README.md` and `docs/License_System_Guide.md`.
 

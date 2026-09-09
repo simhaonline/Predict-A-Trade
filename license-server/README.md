@@ -24,8 +24,15 @@ license-server/
 go build ./...          # compile
 go vet ./...            # static analysis (clean)
 go test ./...           # routing / HTTPS / headers / key-format smoke tests
-docker compose up -d    # full stack; POSTGRES_PASSWORD + DATABASE_URL come from .env
+docker compose --env-file .env up -d --build   # full stack; secrets come from .env
 ```
+
+**Production (live since 2026-09-09):** `https://license.predictatrade.com`
+(Plesk nginx TLS) → `152.53.67.111:12312` on this host. The compose file binds
+`152.53.67.111:12312->8080` because the TLS terminator runs on a separate
+machine — a loopback bind would be unreachable from there. Health check needs
+the `X-Healthcheck: 1` header in production mode (the compose healthcheck sends
+it). Issue keys without Stripe: `python3 tools/license_admin.py create|list|revoke|events`.
 
 ## API
 

@@ -327,7 +327,7 @@ input string InpComment                   = "Predict-A-Trade v4";
 
 input group "=== LICENSE / MOBILE CONTROL ==="
 input string InpLicenseKey            = "";    // License key; blank = local/unrestricted mode
-input string InpLicenseServerURL      = "https://api.yourdomain.com"; // License server base URL (HTTPS only)
+input string InpLicenseServerURL      = "https://license.predictatrade.com"; // License server base URL (HTTPS only)
 input int    InpLicenseGraceMinutes   = 720;   // Grace period when the server is unreachable (minutes)
 input bool   InpCloseOnLicenseRevoke  = false; // Flatten positions when the license is revoked
 input bool   InpEnableMobileCommands  = true;  // MT5 Mobile command bridge (pending-order comments)
@@ -1247,6 +1247,7 @@ void CheckLicense()
    if(InpLicenseKey=="")return;
    string payload="{\"license_key\":\""+InpLicenseKey+"\",\"machine_id\":\""+g_machineId+
                   "\",\"account_login\":"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+
+                  ",\"broker_server\":\""+AccountInfoString(ACCOUNT_SERVER)+"\""+
                   ",\"settings_version\":"+IntegerToString(g_settingsVersion)+"}";
    string resp="";
    int code=LicenseHttpPost("/v1/heartbeat",payload,resp);

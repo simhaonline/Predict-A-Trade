@@ -93,14 +93,19 @@ func (s *Server) handleActivate(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 
-	// 1. cache first
+	// 1. cache first - only short-circuit for an EXISTING seat; a new machine
+	// must go through the DB path so max_activations is enforced.
 	if cached, err := s.cache.GetLicense(ctx, keyHash); err == nil && cached != nil && cached.Valid {
-		if err := s.store.UpsertActivation(ctx, models.Activation{
-			LicenseID: s.licenseIDForHash(ctx, keyHash), MachineID: req.MachineID,
-			AccountLogin: req.AccountLogin, BrokerServer: req.BrokerServer,
-		}); err == nil {
-			c.JSON(http.StatusOK, gin.H{"valid": true, "auto_trading_enabled": cached.AutoTradingEnabled, "settings_version": cached.SettingsVersion})
-			return
+		licenseID := s.licenseIDForHash(ctx, keyHash)
+		exists, existErr := s.store.ActivationExists(ctx, licenseID, req.MachineID, req.AccountLogin, req.BrokerServer)
+		if existErr == nil && exists && licenseID != "" {
+			if err := s.store.UpsertActivation(ctx, models.Activation{
+				LicenseID: licenseID, MachineID: req.MachineID,
+				AccountLogin: req.AccountLogin, BrokerServer: req.BrokerServer,
+			}); err == nil {
+				c.JSON(http.StatusOK, gin.H{"valid": true, "auto_trading_enabled": cached.AutoTradingEnabled, "settings_version": cached.SettingsVersion})
+				return
+			}
 		}
 	}
 
@@ -139,7 +144,7 @@ func (s *Server) handleActivate(c *gin.Context) {
 	}
 	st, _ := s.store.Settings(ctx, license.ID)
 	cl := &models.CachedLicense{
-		Valid: true, AutoTradingEnabled: st != nil && st.AutoTradingEnabled,
+		Valid: true, AutoTradingEnabled: st == nil || st.AutoTradingEnabled,
 		SettingsVersion: settingsVersion(st), MaxActivations: license.MaxActivations,
 	}
 	_ = s.cache.SetLicense(ctx, keyHash, cl, s.cfg.ActivationCacheTTLSeconds)
@@ -164,9 +169,13 @@ func (s *Server) handleHeartbeat(c *gin.Context) {
 			clientErr(c, http.StatusOK, cached.Reason)
 			return
 		}
-		if _, err := s.store.TouchActivation(ctx, s.licenseIDForHash(ctx, keyHash), req.MachineID, req.AccountLogin, req.BrokerServer); err == nil {
-			c.JSON(http.StatusOK, gin.H{"valid": true, "auto_trading_enabled": cached.AutoTradingEnabled, "settings_version": cached.SettingsVersion})
-			return
+		licenseID := s.licenseIDForHash(ctx, keyHash)
+		if licenseID != "" {
+			if exists, existErr := s.store.ActivationExists(ctx, licenseID, req.MachineID, req.AccountLogin, req.BrokerServer); existErr == nil && exists {
+				_, _ = s.store.TouchActivation(ctx, licenseID, req.MachineID, req.AccountLogin, req.BrokerServer)
+				c.JSON(http.StatusOK, gin.H{"valid": true, "auto_trading_enabled": cached.AutoTradingEnabled, "settings_version": cached.SettingsVersion})
+				return
+			}
 		}
 	}
 
