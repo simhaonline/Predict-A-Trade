@@ -2469,7 +2469,7 @@ void EvaluateScalpSignal()
    double c2=iClose(eaSymbol,PERIOD_M1,2),h2=iHigh(eaSymbol,PERIOD_M1,2),l2=iLow(eaSymbol,PERIOD_M1,2);
    if(g_atr<=0)return;
    int um=MinuteOfDay(UTCNow());
-   double minBody=MathMax(0.25,InpScalpMinMomentumATR)*g_atr;
+   double minBody=InpScalpMinMomentumATR*g_atr;   // [FIX] honor the input (the 0.25 floor made the input decorative)
 
    //================= MODE B: VWAP MEAN REVERSION (any session) ==================
    // Documented gold edge: 68-73% reversion after 2-sigma extension. Relaxed from
@@ -2539,8 +2539,8 @@ void EvaluateScalpSignal()
       bool m5Up=(g_m5e20>g_m5e50),m5Dn=(g_m5e20<g_m5e50);
       bool wasBelow=(iClose(eaSymbol,PERIOD_M1,3)<g_ema20||iLow(eaSymbol,PERIOD_M1,1)<=g_ema20);
       bool wasAbove=(iClose(eaSymbol,PERIOD_M1,3)>g_ema20||iHigh(eaSymbol,PERIOD_M1,1)>=g_ema20);
-      if(m5Up&&wasBelow&&c1>g_ema20&&c1>o1){g_scalpSignal=1;g_scalpWhy="EMA pullback LONG";return;}
-      if(m5Dn&&wasAbove&&c1<g_ema20&&c1<o1){g_scalpSignal=-1;g_scalpWhy="EMA pullback SHORT";return;}
+      if(m5Up&&wasBelow&&c1>g_ema20&&c1>o1){g_scalpSignal=4;g_scalpWhy="EMA pullback LONG";return;}
+      if(m5Dn&&wasAbove&&c1<g_ema20&&c1<o1){g_scalpSignal=-4;g_scalpWhy="EMA pullback SHORT";return;}
    }
 }
 
@@ -4447,6 +4447,8 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       // Momentum modes need liquid hours; reversion works everywhere (range fades).
       bool liquid=(w==WIN_TOKYO_LONDON||w==WIN_LONDON_NY||w==WIN_LONDON_OPEN||w==WIN_NY_OPEN
                    ||w==WIN_LONDON||w==WIN_NEWYORK);
+      //--- [FIX] thin-session veto applies to pure momentum bursts only; EMA pullback
+      //--- (4/-4) and VWAP reversion (2/-2) are valid in ALL FOUR sessions.
       if((g_scalpSignal==1||g_scalpSignal==-1||g_scalpSignal==3||g_scalpSignal==-3)&&!liquid)
       {why="momentum signal in thin session";GateHist("momentum signal in thin session");return false;}
       // Anti-stacking: no second scalp same direction within the configured spacing
@@ -4802,14 +4804,31 @@ void TryArm()
    //--- Setup already exists (setup-driven); the confidence engine classifies and may veto.
    if(InpUseConfidenceEngine&&InpAutoCapitalProfile)
    {
-      double dEntry=(dir>0?Ask():Bid());   // market plans enter here; pending adjusted below for straddle
+      double dEntry=(dir>0?Ask():Bid());
       ENUM_SIGNAL_DECISION dec=BuildSignalDecision(dir,dEntry,sl,t1,t2,t3,lots,w,hv,setup);
+      //--- [SIMPLE-MODE HONESTY] the confidence engine is ADVISORY in simple mode:
+      //--- it grades the candidate (dashboard + CSV show conf and reasons) and vetoes
+      //--- only NEGATIVE-expectancy candidates (net-RR < 0 => costs exceed reward).
+      //--- The full veto lived one layer too deep and killed valid scalps after
+      //--- generation (user audit: "simple mode is not simple").
       if(dec==SIGNAL_NO_TRADE)
       {
-         g_gateReason=(g_lastDecision.gateReason!=""?g_lastDecision.gateReason:"NO_TRADE");
-         return;
+         bool envBlock=(StringFind(g_lastDecision.gateReason,"EXTREME_VOLATILITY")>=0
+                       ||StringFind(g_lastDecision.gateReason,"LOW_LIQUIDITY")>=0
+                       ||StringFind(g_lastDecision.gateReason,"DISORDER")>=0);
+         bool negativeEdge=(g_lastDecision.riskReward<=0);
+         if(InpSimpleScalpMode&&!envBlock&&!negativeEdge)
+         {
+            g_gateReason="SIGNAL "+(dec==SIGNAL_BUY?"BUY":"SELL")+" conf "+DoubleToString(g_lastDecision.confidence,1)+" (advisory)";
+         }
+         else
+         {
+            g_gateReason=(g_lastDecision.gateReason!=""?g_lastDecision.gateReason:"NO_TRADE");
+            GateHist(g_gateReason);
+            return;
+         }
       }
-      g_gateReason="SIGNAL "+(dec==SIGNAL_BUY?"BUY":"SELL")+" conf "+DoubleToString(g_lastDecision.confidence,1);
+      else g_gateReason="SIGNAL "+(dec==SIGNAL_BUY?"BUY":"SELL")+" conf "+DoubleToString(g_lastDecision.confidence,1);
    }
    int layers=(directional?1:MathMax(1,MathMin(3,InpStraddleLayers)));if(hv&&InpAB_EnableHighVol)layers=MathMin(2,layers+1);
    // Ultra-scalp mode: always a single MARKET order - pendings/straddles add latency
