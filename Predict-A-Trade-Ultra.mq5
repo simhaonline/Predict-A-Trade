@@ -147,8 +147,8 @@ input group "=== ULTRA-SCALP MODE (SIMPLIFIED ENGINE) ==="
 input bool   InpSimpleScalpMode           = true;      // TRUE = simple M1 scalp engine (recommended); false = full multi-filter engine
 input double InpScalpMinMomentumATR       = 0.08;      // simple engine: min last-bar momentum in ATR (0.12 = gentle)
 input double InpTP1SpreadMultiple         = 2.0;       // Phase 2.4: TP1 must exceed (spread+slippage) x this multiple, else TP1_TOO_TIGHT
-input bool   InpSimpleBiasFilter          = true;      // [WIN-EDGE] block shorts when H1/M15 trend is up, longs when trend is down (don't fade HTF trend)
-input double InpSimpleBiasMinAlign        = 1;         // [WIN-EDGE] min # of {M15,H1} EMA-stacked in-trend to assert a bias (0 = off-style always-trade)
+input bool   InpSimpleBiasFilter          = true;      // [WIN-EDGE] SOFT bias guard for trend-following setups only. Set false to disable entirely.
+input double InpSimpleBiasMinAlign        = 2;         // [WIN-EDGE] # of {M15,H1} EMA-stacked in-trend REQUIRED to hard-block (2 = both must agree; 1 = either blocks = stricter; 0 = off)
 
 input group "=== CAPITAL PROTECTION ==="
 input double InpDailyLossPercent          = 2.5;
