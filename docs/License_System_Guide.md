@@ -82,9 +82,11 @@ Verify: `go test ./...` (routing, HTTPS enforcement, headers, key format), `go v
    profile is compiled into the EA's input defaults; the subscriber's only
    required entry is the license key in `InpLicenseKey` (they may tune any other
    input in the same dialog).
-3. Tools → Options → Expert Advisors → **Allow WebRequest for listed URL** → add the
-   server base URL (e.g. `https://license.predictatrade.com`). Without this the EA logs the
-   4014 fix hint and cannot reach the server.
+3. Tools → Options → Expert Advisors → **Allow WebRequest for listed URL** → add BOTH
+   endpoints: `https://license.predictatrade.com` and `https://license2.predictatrade.com`
+   (no trailing slashes). The EA fails over between them automatically — they are two
+   independent TLS frontends (Plesk edge and direct origin), so an ISP/middlebox
+   problem on one path switches to the other without user action.
 4. Attach to an XAUUSD M1 chart. First validation happens in `OnInit`; failure without
    an active grace period refuses to start (`INIT_FAILED`).
 
