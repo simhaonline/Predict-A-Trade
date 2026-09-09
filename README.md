@@ -9,7 +9,7 @@ DLLs, zero external scripts. All dependencies are native MQL5 or optional web da
 vendors — the EA runs identically without it.
 
 ```
-Predict-A-Trade-Ultra.mq5      the EA (single file, ~6,319 lines)
+Predict-A-Trade-Ultra.mq5      the EA (single file, ~6,456 lines)
 tools/build_presets.py         self-contained .set generator (Python stdlib only)
 presets/*.set                  4 ready-to-load presets (inputs each)
 docs/                          audit, methodology, module & deployment docs
@@ -35,9 +35,10 @@ An ultra-scalper that trades XAUUSD M1 through a four-session opportunity engine
 - **HTF Support/Resistance zones** (built-in SR module): filters entries into strong
   opposing zones, snaps targets to zone edges, refines stops behind zones, trails the
   runner — additive, switchable, never generates entries, never increases risk.
-- **Capital protection**: daily/weekly/monthly loss breakers, floating-DD risk
-  step-down, consecutive-loss decay + hard pause, daily trade cap, aggregate &
-  directional risk caps, no-martingale / no-averaging-down sizing freeze.
+- **Capital protection**: daily/weekly/monthly loss breakers (floating + realized), per-window
+  daily loss breaker, floating-DD risk step-down, consecutive-loss decay + hard pause,
+  daily trade cap, aggregate & directional risk caps, no-martingale / no-averaging-down
+  sizing freeze.
 - **Ops hardening**: broker profile detection & point auto-scaling, netting-account
   degradation, spread-aware TP1 viability guard, Pct misconfiguration guards, kill
   switch, push alerts, heartbeat, state persistence with reconciliation, self-test
@@ -61,9 +62,12 @@ signals live**, logging `ENTRY_GATE no scalp signal` on every bar.
    pre-loaded; in LIVE / cold-attach the M5 series loads asynchronously and the gate
    stayed `false` forever — `OnTick` skipped `EvaluateScalpSignal`, so `g_scalpSignal`
    stayed `0`. **Fix:** readiness now needs only M1-core indicators
-   (`ATR>0 && EMA20>0 && EMA50>0 && RSI>0`); M5/M15/M30/H1 are degraded-graceful —
-   seeded from M1 EMAs when absent, retried per tick, and can never block the M1 scalp
-   engine.
+ (`ATR>0 && EMA20>0 && EMA50>0 && RSI>0`); M5/M15/M30/H1 are degraded-graceful —
+ retried per tick and gracefully falling back to the M1 EMA stack when `m5Present` is
+ false. **M5 is no longer seeded from M1 EMAs** (the old seed injected wrong-direction
+ trend signals for minutes after a cold start / disconnect — removed 2026-09-09); a
+ missing M5/H1 series now simply disables the M5-confirmed setups instead of faking a
+ trend, and can never block the M1 scalp engine.
 2. **Signal vetoes too strict to ever fire on gold M1.** VWAP reversion demanded
    `RSI≥70/≤30` + `ADX<45` + a 1.8σ extension; NY momentum demanded a 0.5×ATR body only
    news ticks satisfy. **Fix:** VWAP reversion now fires on a 1.2σ extension with a
@@ -90,6 +94,8 @@ entries, not bad luck.
    **Fix:** `SCALP_TP1_ATR` raised 0.55 → **0.85 ATR** (≥ SL, so ≥1R). The 3-TP ladder
    distances follow (TP2 1.40, TP3 2.10 ATR). VWAP-reversion target floor raised to
    0.8 ATR vs its 0.45 ATR stop.
+   **Further raised to 1.10 ATR on 2026-09-09** (`SCALP_TP1_ATR = 1.10`) with a hard floor
+   `MIN_TP1_R = 1.30` so TP1 is always ≥ 1.30× the *actual* (spread-floored) SL — see §2.6.
 2. **Mean-reversion fighting the trend.** The VWAP reversion faded *any* 1.5σ extension,
    including into a live trend. **Fix:** a down-extension fade (LONG) only fires when the
    trend is *not* down; an up-extension fade (SHORT) only when the trend is *not* up —
@@ -139,6 +145,108 @@ the London/NY windows, so `g_scalpSignal` stayed 0 for most of the day.
 
 Net effect: same five setups, now genuinely always-on, with ≥1R reward and a working
 3-TP ladder + break-even lock in simple mode.
+
+### 2.6 Loss-control hardening (2026-09-09) — small-account + all-profile fixes
+
+Diagnosis day: the user's XAUUSD M1 report for 2026-09-09 was read against the EA built
+that day. The raw report's "+$44,270" was a **corrupted export** (the running balance
+leaked into the Profit column of 1,438 junk rows). The genuine account-scale trades show
+the day was a **net loss of −$2.74 at a 47.4% win rate** (avg win +$1.70 vs avg loss
+−$1.67) — a ~1:1 scalp under 50% win rate, which is a guaranteed slow bleed. Three root
+causes were visible in the trade data:
+
+1. **Stops inside the spread.** Minimum SL observed was 0.33 ATR-points on gold whose
+   spread is ~3.0 ATR-points — entries stopped out within ~1 minute because the stop sat
+   inside the spread/stop-level.
+2. **Re-entry thrash.** `InpMinSecondsBetweenEntries` was 20 s; on an M1 chart the same
+   signal stacked entries seconds apart and the second scalp got picked off.
+3. **TP ≈ SL (≈1:1).** At a <50% hit rate that is negative expectancy.
+
+Fixes applied (all percentage/ATR-based, so they scale to MICRO / STANDARD / PRO):
+
+1. **SL floor clears the live spread** — `MinTradeDistance()` now floors the stop at
+   `max(broker stops/freeze level, g_spreadAvg) + buffer`, so a tick can never instant-stop
+   the trade. Applies to every capital profile.
+2. **Entry spacing 20 s → 60 s** (`InpMinSecondsBetweenEntries = 60`) — kills same-signal
+   re-entry thrash while still allowing genuine re-entries. MICRO is max-1-position anyway,
+   so this is safe there.
+3. **TP1 forced ≥ 1.30× SL** — `SCALP_TP1_ATR` 0.85 → **1.10 ATR** and a new hard floor
+   `MIN_TP1_R = 1.30` so TP1 ≥ 1.30× the *actual* (possibly spread-floored) SL. Simulation
+   confirms the scalp is **1.38R** across ATR 2–5 and spread 10–50 points. At the 47% win
+   rate from the diagnosis day this flips expectancy from −0.05R to **+0.09R per trade**.
+4. **Daily circuit breaker hardened** — floating-DD halt 2.5% → **5.0%** (so one open
+   min-lot scalp, ~2.5% risk on MICRO, does not freeze the account); added a **realized**
+   daily-loss halt at **3.0%** (`InpDailyRealizedLossPercent`) that trips even if floating
+   equity later recovers; consecutive-loss hard pause **10 → 6** (`InpMaxConsecutiveLosses`).
+5. **Per-window daily-loss breaker (new)** — `InpWindowDailyLossPercent = 1.5`. Each of the
+   11 session windows tracks its own realized loss for the day; when a window's loss hits
+   1.5% of day-start equity **only that window halts** (`window daily loss halt`), the rest
+   of the day's sessions keep trading. Reset on day rollover. Shown on the dashboard as a
+   red `Window HALT: <session>` row.
+6. **Capital-profile risk ceilings raised for small accounts** — MICRO aggregate 0.75% →
+   **2.00%**, directional 0.50% → **1.00%**, window 0.50% → **1.00%**; the no-SL catastrophe
+   penalty is capped at the profile's aggregate budget (was 5× equity, which permanently
+   blocked min-lot scalps); and the lot solver / `RiskRoom()` both floor a small account at
+   min-lot risk when `InpAllowMinLotFallback=true` and the position cap is not yet reached.
+   Result: a $100 XAUUSD account that was blocked with `PORTFOLIO_RISK_CAP` now gets its one
+   min-lot scalp; a $600 STANDARD account keeps its second scalp.
+
+7. **Warm-up gate + M5 seeding removed** (prompt.md review, 2026-09-09). Two fixes from the
+   external review that were genuinely missing:
+   - **No M5-from-M1 seeding.** The engine previously seeded the M5 EMAs from the M1 EMA20
+     after a cold start / disconnect, which fired *wrong-direction* M5-trend signals for
+     minutes (M1 EMA20 = 20-min, M5 EMA20 = 100-min, so they are not interchangeable). M5 now
+     stays at 0 until real M5 data loads; when `m5Present` is false the M1 EMA stack is the
+     fallback (already in code). A missing M5 series just disables the M5-confirmed setups
+     instead of faking a trend.
+   - **Post-start warm-up** — `InpWarmupBars = 30`. The EA opens **no new entries for the
+     first 30 M1 bars after start** so MTF/M5 evidence stabilizes and it never trades on
+     half-loaded higher-TF data. Skipped in the Strategy Tester (history is fully loaded on
+     init). All protections still apply after warm-up.
+
+All edits are in `Predict-A-Trade-Ultra.mq5` and compile under MetaEditor (F7). The EA was
+verified by Python simulation of the exact code math (no MQL5 compiler in the build env).
+
+### 2.7 Diagnostics & tuning fixes from the second review (2026-09-09)
+
+A second external review of the EA produced five applied fixes (every other point was
+screened against the code and either already implemented or deliberately declined):
+
+1. **Per-signal-mode P/L now exported.** `g_setupStats` already bucketed
+   trades/wins/losses/netR per setup internally, but nothing surfaced it. The performance
+   report CSV (`PAT101_Performance_*.csv`) now includes six rows — `setup_ema_pullback`,
+   `setup_vwap_reversion`, `setup_london_breakout`, `setup_ny_momentum`, `setup_complex`,
+   `setup_recovery` — each as `trades/W/L netR=…`, so a broken mode is distinguishable from
+   an unlucky one.
+2. **No recovery legs into a bleeding day.** `TryRecovery()` (complex mode; disabled in
+   simple mode) now returns immediately when the realized day net loss has reached **50% of
+   the realized daily-halt threshold** (`InpDailyRealizedLossPercent`, 3.0%): counter-trend
+   reversal legs into a day that is already down 1.5% compound the bleed. The daily breaker
+   still stops the day at 100% of the threshold; this halves the damage first.
+3. **Distinct spread-rejection keys.** Three different conditions in `AdaptiveSpreadOK()`
+   all previously wrote the same `SPREAD_RELATIVE_HIGH` histogram key. They are now
+   `SPREAD_ATR_RATIO` (spread > % of ATR), `SPREAD_PERCENTILE` (rolling-distribution
+   ceiling), and `SPREAD_SPIKE` (vs rolling baseline) — when the EA is not trading, the
+   gate-rejection histogram says exactly which condition fired.
+4. **Commission learning decay 0.90/0.10 → 0.70/0.30.** A broker commission change now
+   converges in ~7 closed deals instead of ~23, so risk pricing stops mispricing after an
+   account type or commission tier change.
+5. **VWAP tester warm-up logged.** The time-range `CopyRates` anchor can return 0 during
+   tester warm-up / cold attach; the signal layer already falls back to the Bollinger
+   midline, so the mode never dies — it was merely silent. A one-time Journal line now
+   states `VWAP anchor unavailable ... BB-mid fallback active`.
+
+Screened and NOT applied (deliberate, do not "fix" these again):
+
+- **Confidence engine stays advisory in simple mode** — making the threshold binding
+  re-creates the documented regression where valid scalps were vetoed after generation
+  (§2.1's user audit: "simple mode is not simple").
+- **Bias gate keeps its block-on-N-opposing logic** — the suggested "require N agreeing
+  TFs" alternative would block every trend entry while H1/M15 history is still loading
+  (H1 EMA50 needs 50 hours of bars), recreating the zero-signals-live failure class.
+- **`MinTradeDistance()` keeps the spread floor** — that floor is the 2026-09-09 fix that
+  stopped instant stop-outs (§2.6); rejecting wide-spread/disorder entries is intended
+  behavior, not a paradox.
 
 ## 3. Quick start
 
@@ -247,7 +355,7 @@ A trade fires only when **all** gates pass, in order:
 6. Spread gate: relative `InpMaxSpreadToATRPct` (default 150%) + adaptive percentile /
    spike multipliers + broken-feed extreme check; ATR floor/chop ceiling.
 7. Simple-mode guards: 60 s same-direction spacing, 0.35 ATR proximity to an open
-   scalp, daily trade cap (25), position cap.
+   scalp, daily trade cap (40), position cap.
 8. **SR entry gate** (`// [SR]`): blocks entries into an opposing zone with
    strength ≥ 5.0 within 0.45 ATR (unless a confirmed breakout); HARD mode adds TP1
    headroom ×1.10. Reasons are machine-parsable (`SR_WALL_5.8@0.31A`, `SR_NO_HEADROOM`).
@@ -289,13 +397,14 @@ backstop against silence.
 
 | Leg | Distance from entry | Closes | R:R (SL = 0.80 ATR) |
 |---|---|---|---|
-| TP1 | **0.85 × ATR** (`SCALP_TP1_ATR`) | **75%** | **1.06R** |
-| TP2 | **1.40 × ATR** total | **20%** | 1.75R |
-| TP3 | **2.10 × ATR** total | **5%** runner, trailed | 2.62R |
+| TP1 | **1.10 × ATR** (`SCALP_TP1_ATR`, hard floor `MIN_TP1_R` = 1.30 × actual SL) | **75%** | **1.38R** |
+| TP2 | `InpTP2_ATR_Floor` 0.60 … `InpTP2_ATR_Cap` 1.10 ATR (capped at 1.40 ATR total) | **20%** | ~0.75–1.75R |
+| TP3 | `InpTP3_ATR_Floor` 1.00 … `InpTP3_ATR_Cap` 1.80 ATR (capped at 2.10 ATR total) | **5%** runner, trailed | ~1.15–2.62R |
 
 Stop distances by setup: 0.80 ATR (momentum / pullback / EMA20 reversion),
 0.45 ATR (VWAP reversion beyond the extreme, target floor 0.8 ATR), 0.85 ATR (London
-breakout).
+breakout). The SL is also floored in `MinTradeDistance()` at the live spread + broker
+stop/freeze level + buffer, so a trade can never be stopped out inside the spread.
 
 Why: gold M1 ATR swings ~30 pt (Asia) to ~150 pt (London/NY) — fixed points are wrong in
 both regimes; a % of price (0.05% of 3400 = 170 pt) is a swing trade at scalp scale.
@@ -335,11 +444,12 @@ and a ±1 complex-mode vote that can never satisfy `InpMinFilterScore` alone.
 
 | Layer | Mechanism |
 |---|---|
-| Per-trade risk | 0.35% → lot; ×0.70 decay per consecutive loss (floor 0.10%); step-down past half the floating-DD limit; SR-widened stops recompute the lot |
-| Daily breaker | −2.5% day loss or 3 consecutive losses → breaker (CLOSE_ALL flattens) + hard pause |
+| Per-trade risk | 0.35% → lot (auto capital profile); ×0.70 decay per consecutive loss (floor 0.10%); step-down past half the floating-DD limit; SR-widened stops recompute the lot |
+| Daily breaker | −5.0% floating-DD, **−3.0% realized**, or **6 consecutive losses** → breaker (CLOSE_ALL flattens) + hard pause |
 | Weekly / monthly | −6% / −10% |
-| Trade hygiene | 25 trades/day, single market order, 10-min time stop, swap-window flat, Friday cutoff 19:00 server |
-| Entry quality | relative spread cap (default 150% of ATR), ATR floor/ceiling, TP1_TOO_TIGHT, TP1 cost-positivity, SR walls, bias gate (trend-following only) |
+| Per-window breaker | any of the 11 session windows losing ≥ 1.5% of day-start equity halts **only that window** (`window daily loss halt`); other windows keep trading |
+| Trade hygiene | 40 trades/day, single market order, 10-min time stop, swap-window flat, Friday cutoff 19:00 server |
+| Entry quality | SL floor clears the live spread; relative spread cap (default 150% of ATR), ATR floor/ceiling, TP1_TOO_TIGHT, TP1 cost-positivity, SR walls, bias gate (trend-following only) |
 | Latch safety | `EXECUTION_UNCERTAIN` auto-reconciles (no pending order, or 90 s watchdog); corrupt state resets cleanly |
 | External data | FMP down → broker EURUSD fallback; calendar unavailable → trading continues |
 
@@ -349,7 +459,9 @@ Two columns, draggable, collapsible, `PAUSE ARMING` button: session windows + UT
 + overlaps, spread/ATR/volume percentiles, filter score & bias, SMC/IFVG/PTB, HV state,
 positions/lots, risk vs caps, window budget, trades today + consecutive losses, news
 countdown, slippage, SR zone summary (nearest R/S with strength & distance),
-today/lifetime performance, per-window expectancy, and the 24 h UTC session map.
+today/lifetime performance, per-window expectancy, and the 24 h UTC session map. It also
+shows live circuit-breaker state: `Day Realized (x% / 3%)` and, when a session trips its
+own loss limit, a red `Window HALT: <session>` row.
 
 ## 5. Repository layout
 
@@ -387,8 +499,6 @@ Full protocol: `docs/05_Validation_Protocol.md`.
 - **Self-contained EA**: one .mq5, no includes, no DLLs, no CTrade — native
   `OrderSend`/`SymbolInfo*`/`Position*` throughout. The preset builder is stdlib
   (known-answer self-test at init) rather than calling any external tool.
-  local mode; fail-safe grace for previously-validated copies; first-run failure blocks
-  start; machine-bound seats; no secrets committed.
 - **Trading invariants**: no martingale, no averaging down, no scale-in, no
   loss-chasing recovery in simple mode, stops never move against a position, realized
   risk never exceeds `InpRiskPercent` on any path, `InpSimpleScalpMode=true` default.
@@ -404,10 +514,6 @@ Full protocol: `docs/05_Validation_Protocol.md`.
   one-time rollover note in the Journal).
 - The bias gate is a soft, consensus-based guard on trend-following setups only; it is
   tunable (`InpSimpleBiasFilter`, `InpSimpleBiasMinAlign`) and fully disable-able.
-  for self-containment; the server's response schema is small and stable.
-- Stripe key delivery currently logs a redacted confirmation (email worker hook point
-  is `mailerSend` in `internal/api/webhook_support.go`) — wire your transactional
-  email provider there.
 
 ---
 

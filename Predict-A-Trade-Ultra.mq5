@@ -151,14 +151,17 @@ input bool   InpSimpleBiasFilter          = true;      // [WIN-EDGE] SOFT bias g
 input double InpSimpleBiasMinAlign        = 2;         // [WIN-EDGE] # of {M15,H1} EMA-stacked in-trend REQUIRED to hard-block (2 = both must agree; 1 = either blocks = stricter; 0 = off)
 
 input group "=== CAPITAL PROTECTION ==="
-input double InpDailyLossPercent          = 2.5;
+input double InpDailyLossPercent          = 5.0;       // [FIX 2026-09-09] floating equity DD that halts the day. Raised from 2.5 so a single open min-lot scalp (~2.5% risk on MICRO) does NOT trip it; only a genuine adverse swing halts.
+input double InpDailyRealizedLossPercent   = 3.0;       // [FIX 2026-09-09] REALIZED net loss for the day (%) that halts trading. Catches a truly losing day even if floating equity later recovers. Scales to every account tier.
+input double InpWindowDailyLossPercent     = 1.5;       // [FIX 2026-09-09] per-WINDOW realized loss for the day (%) that halts ONLY that session (other windows keep trading). Scales to every account tier.
 input double InpMaxFloatingDDPercent      = 3.0;
 input double InpWeeklyLossLimit           = 6.0;
 input double InpMonthlyLossLimit          = 10.0;
 input double InpRiskPercent               = 0.35;      // LEGACY/MANUAL: base trade risk when InpAutoCapitalProfile=false
 input double InpRiskStepDownOnDD          = 0.15;
-input int    InpMaxConsecutiveLosses      = 10;       // pause only after 3 straight; risk decays 30% per loss before that
-input int    InpMaxTradesPerDay           = 100;
+input int    InpMaxConsecutiveLosses      = 6;        // [FIX 2026-09-09] lowered from 10. Pause the day after 6 straight losses. Risk already decays 30% per loss before that, so 6 is a firm-but-fair "something is wrong, stop" line that still lets normal variance through.
+input int    InpMaxTradesPerDay           = 40;        // [FIX 2026-09-09] lowered from 100. 100/day on M1 XAUUSD = a trade every ~4 min = death-by-a-thousand-cuts with spread+commission. 40 still allows a genuinely active multi-window day but caps churn; the 6-loss pause + daily breakers bound risk further.
+input int    InpWarmupBars                = 30;        // [FIX 2026-09-09] no NEW entries for the first N M1 bars after EA start, so MTF/M5 indicators stabilize. In the tester warmup is skipped (init loads full history).
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
 input double InpMinLotMaxRiskPct          = 5.0;       // MANUAL: min-lot ceiling when AutoCapitalProfile=false (else profile ceiling: MICRO 5% / STD 3% / PRO 2%)
 input double InpMaxAggregateOpenRiskPct   = 2.5;
@@ -219,7 +222,7 @@ input int    InpMaxConcurrentPositions    = 3;
 input double InpMaxTotalLots              = 1.20;      // LEGACY/MANUAL: absolute cap only when InpUseAbsoluteLotEmergencyCap=true (never in Auto mode)
 input bool   InpArmWhileInTrade           = true;
 input bool   InpScaleIn                   = false;
-input int    InpMinSecondsBetweenEntries  = 20;     // was 120
+input int    InpMinSecondsBetweenEntries  = 60;     // [FIX 2026-09-09] raised from 20 (was 120). 20s on a M1 chart let the same signal stack entries seconds apart, then the 2nd scalp got picked off. 60s still allows genuine re-entries but kills the re-entry thrash that produced today's 47% win rate.
 input int    InpMinBarsFreshStructure     = 2;
 input int    InpMaxSignalsPerWindow       = 10;
 input double InpPerWindowRiskBudgetPct    = 1.5;
@@ -572,6 +575,7 @@ double g_atr=0,g_adx=0,g_adxPlus=0,g_adxMinus=0,g_rsi=0;
 double g_ema20=0,g_ema50=0,g_h1e20=0,g_h1e50=0,g_m15e20=0,g_m15e50=0;
 double g_m30e20=0,g_m30e50=0;   // [MTF] M30 stack
 double g_vwap=0,g_vwapUp=0,g_vwapDn=0;
+bool   g_vwapFailLogged=false;   // [FIX 2026-09-09] one-time log when the VWAP CopyRates anchor fails
 bool g_fvg=false; int g_fvgDir=0; double g_fvgTop=0,g_fvgBottom=0;
 bool g_ifvg=false; int g_ifvgDir=0; double g_ifvgTop=0,g_ifvgBottom=0;
 bool g_ptb=false; int g_ptbDir=0; double g_ptbTop=0,g_ptbBottom=0;
@@ -1386,6 +1390,7 @@ int      g_fmp429Count=0;
 int      g_fmpCycle=0;
 bool     g_usdGotSPX=false;
 double   g_m5e20=0,g_m5e50=0,g_m5adx=0,g_m5adxPlus=0,g_m5adxMinus=0;
+bool     g_m5Ready=false;   // [FIX 2026-09-09] true only once REAL M5 data has loaded (no M1 seeding)
 double   g_bbUp=0,g_bbLo=0,g_bbMid=0;
 int      g_scalpSignal=0;   // +1 trend-long, -1 trend-short, +2 reversion-long, -2 reversion-short, 0 none
 string   g_scalpWhy="";
@@ -1423,6 +1428,7 @@ PositionState g_ps[];
 double g_tp1PctEff=0.75,g_tp2PctEff=0.20,g_tp3PctEff=0.05;
 double InpTPPctSanitize(double v){ return (v>1.0?v/100.0:v); }
 datetime g_lastOffsetRefresh=0,g_lastBar=0,g_lastExitTime=0,g_lastEntryTime=0;
+int g_barsSeen=0;   // [FIX 2026-09-09] M1 bars seen since EA start (warm-up gate)
 // Simple-mode armed plan snapshot: TryArm() computes the scalp ladder (t1/t2/t3) before
 // the market order fills; OnTradeTransaction later reconstructs position state from the
 // deal. These carry the ARMED plan into AddPositionState so the broker TP and the managed
@@ -1476,6 +1482,7 @@ void ReportGate()
 
 int g_tradesToday=0,g_consecutiveLosses=0;
 double g_dayAnchor=0,g_weekAnchor=0,g_monthAnchor=0,g_maxDDSeen=0;
+double g_dayRealizedNet=0;   // [FIX 2026-09-09] running REALIZED net P/L for the current day (for InpDailyRealizedLossPercent halt)
 int g_dayKey=-1,g_weekKey=-1,g_monthKey=-1;
 bool g_stopDay=false,g_stopWeek=false,g_stopMonth=false;
 double g_commissionRTPerLot=0;
@@ -1483,6 +1490,12 @@ double g_windowRiskUsed[WIN_COUNT];
 int g_windowSignals[WIN_COUNT];
 string g_lastSetupBuy[WIN_COUNT],g_lastSetupSell[WIN_COUNT];
 datetime g_lastWindowEntry[WIN_COUNT];
+//--- [FIX 2026-09-09] PER-WINDOW daily loss breaker: each session tracks its own realized
+//--- loss for the day. When a window's loss hits the threshold only THAT window halts
+//--- (windowHaltedToday), the rest of the day's sessions keep trading. Scales to every
+//--- account tier because it is a % of day-start equity.
+double g_windowDayRealized[WIN_COUNT];
+bool   g_windowHaltedToday[WIN_COUNT];
 
 int g_log=INVALID_HANDLE;
 #define UI_PREFIX "PAT4_"
@@ -1545,7 +1558,18 @@ double NormalizeVolume(double lots)
 double PriceNorm(double p){ return NormalizeDouble(MathRound(p/broker.tickSize)*broker.tickSize,broker.digits); }
 double MinTradeDistance()
 {
-   double base=MathMax(broker.stopsLevel,broker.freezeLevel)*broker.point+2*broker.point;
+   // [FIX 2026-09-09] Guarantee every stop clears the live spread AND the broker
+   // stop/freeze level by at least a small safety buffer. On XAUUSD the raw
+   // stopsLevel/freezeLevel floor (often ~0) plus 2 points can sit INSIDE a 30-point
+   // spread, so entries were stopped out within 1 minute (today's min SL was 0.33 pts,
+   // avg 1.87 pts, spread 3.0 pts). Floor = spread + brokerLevel + buffer so a normal
+   // tick cannot instant-stop the trade. g_spreadAvg is the rolling average spread in
+   // points (global, line 1407); used as the floor so the stop always clears the live
+   // spread. Clamped to 100pts so a freak spike can't blow the stop to absurd width.
+   // Fall back to stopsLevel*3 if the tracker hasn't warmed up yet.
+   double spPts=(g_spreadAvg>0?MathMin(g_spreadAvg,100.0):3.0*broker.stopsLevel);
+   double spreadFloor=spPts*broker.point;
+   double base=MathMax(broker.stopsLevel,broker.freezeLevel)*broker.point+spreadFloor+2*broker.point;
    // Phase 4.1: optionally add the safety buffer on top of broker stops/freeze level
    if(InpRespectStopLevel)base+=InpStopLevelBufferPoints*g_ptScale*broker.point;   // [B9] scaled
    return base;
@@ -1555,7 +1579,8 @@ double MinTradeDistance()
 //--- These are the code equivalents of the complex-mode inputs:
 //---   SCALP_TP1_ATR ~ InpTP1_ATR_Floor/Cap midpoint, SCALP_SL_ATR ~ InpSL_ATR_Multiplier.
 //--- Distance = ATR multiple (volatility-adjusted); volume split = decimal fraction (Phase 2.1).
-const double SCALP_TP1_ATR   = 0.85;   // [FIX win%] TP1 >= SL (0.80 ATR) so simple-mode scalp is >=1R, not 0.69R bleed
+const double SCALP_TP1_ATR   = 1.10;   // [FIX 2026-09-09] TP1 must EXCEED SL (0.80 ATR) -> ~1.3R scalp. At the 1:1-ish win rate today's trades showed (47%), a >1R target flips breakeven-negative into net-positive. Applies to all capital profiles (MICRO/STANDARD/PRO) since the simple-scalp engine is profile-independent.
+const double MIN_TP1_R       = 1.30;   // [FIX 2026-09-09] hard floor: TP1 >= 1.30 * actual SL. Protects the R-multiple when the spread-floor widens SL.
 const double SCALP_TP2_TOT   = 0.75;   // TP2 distance from entry (InpTP2_ATR_Floor 0.60..Cap 1.10)
 const double SCALP_TP3_TOT   = 1.15;   // TP3 distance from entry (InpTP3_ATR_Floor 1.00..Cap 1.80)
 const double SCALP_SL_ATR    = 0.80;   // trend-pullback / momentum stop (InpSL_ATR_Multiplier)
@@ -1609,7 +1634,7 @@ bool Copy1(int handle,int buffer,int shift,double &value)
 bool IsNewBar()
 {
    datetime t=iTime(eaSymbol,PERIOD_M1,0);
-   if(t>0 && t!=g_lastBar){ g_lastBar=t; return true; }
+   if(t>0 && t!=g_lastBar){ g_lastBar=t; g_barsSeen++; return true; }
    return false;
 }
 
@@ -2018,12 +2043,12 @@ bool AdaptiveSpreadOK(double atr,string &why)
    double spreadToATRPct=spreadPrice/atr*100.0;
    double spp=SpreadPercentile();
    // (1) relative ATR condition
-   if(spreadToATRPct>InpMaxSpreadToATRPct){why="SPREAD_RELATIVE_HIGH";g_spreadRejects++;return false;}
+   if(spreadToATRPct>InpMaxSpreadToATRPct){why="SPREAD_ATR_RATIO";g_spreadRejects++;return false;}
    // (2) distribution percentile condition (adaptive ceiling)
-   if(spp>InpMaxSpreadPercentileAdaptive){why="SPREAD_RELATIVE_HIGH";g_spreadRejects++;return false;}
+   if(spp>InpMaxSpreadPercentileAdaptive){why="SPREAD_PERCENTILE";g_spreadRejects++;return false;}
    // (3) spike vs rolling baseline (existing average reused; NOT a self-normalizing
    // widening allowance - the fixed sanity cap still binds above).
-   if(g_spreadAvg>0&&spPts>g_spreadAvg*InpSpreadBaselineMultiplier){why="SPREAD_RELATIVE_HIGH";g_spreadRejects++;return false;}
+   if(g_spreadAvg>0&&spPts>g_spreadAvg*InpSpreadBaselineMultiplier){why="SPREAD_SPIKE";g_spreadRejects++;return false;}
    // Absolute last-resort sanity cap: percentage-of-SL budget (SL = InpSL_ATR_Multiplier x ATR).
    double slProj=g_atr*SpreadCompensationFactor()*(InpSimpleScalpMode?SCALP_SL_ATR:InpSL_ATR_Multiplier);
    if(spPts>AdaptiveSpreadCap(slProj)){why="spread hard cap";g_spreadRejects++;return false;}
@@ -2320,7 +2345,15 @@ void UpdateIndicators()
    //--- M5 evidence (pullback/momentum trend): fallback to M1 EMAs handled by callers
    bool m5ok=Copy1(hM5E20,0,1,g_m5e20)&&Copy1(hM5E50,0,1,g_m5e50)
             &&Copy1(hM5ADX,0,1,g_m5adx)&&Copy1(hM5ADX,1,1,g_m5adxPlus)&&Copy1(hM5ADX,2,1,g_m5adxMinus);
-   if(!m5ok&&g_m5e20==0){g_m5e20=g_ema20;g_m5e50=g_ema50;}   // seed from M1 so setups fire
+   if(!m5ok)
+   {
+      // [FIX 2026-09-09] Do NOT seed M5 from M1. M1 EMA20 (20 min) ≠ M5 EMA20 (100 min),
+      // so a seeded M5 trend fires on wrong data for minutes after start/disconnect and can
+      // enter the wrong direction. Leave g_m5e20/g_m5e50 at 0; callers already fall back to
+      // the M1 EMA stack when m5Present is false. g_m5Ready flips true only once real M5 loads.
+      g_m5Ready=false;
+   }
+   else g_m5Ready=true;
    //--- higher TFs: stale-tolerant, retried every tick until they load
    Copy1(hH1EMA20,0,1,g_h1e20);Copy1(hH1EMA50,0,1,g_h1e50);
    Copy1(hM15EMA20,0,1,g_m15e20);Copy1(hM15EMA50,0,1,g_m15e50);
@@ -2343,8 +2376,10 @@ void UpdateIndicators()
    //--- asynchronously, so `ok` stayed false and g_indicatorsReady was FALSE forever ->
    //--- OnTick skipped EvaluateScalpSignal -> g_scalpSignal stuck at 0 -> the
    //--- "no scalp signal" log on every bar (while ATR still displayed, because it is
-   //--- copied before the ok-chain). M5/M15/M30/H1 are degraded-graceful (seeded from
-   //--- M1 / retried per tick) and MUST NOT block the M1 scalp engine. Replay fires
+   //--- copied before the ok-chain). M5/M15/M30/H1 are degraded-graceful (retried per
+   //--- tick; M5 is NO LONGER seeded from M1 EMAs — see the 2026-09-09 fix in
+   //--- UpdateIndicators — and callers fall back to the M1 stack when m5Present is
+   //--- false) and MUST NOT block the M1 scalp engine. Replay fires
    //--- 867 setups/5d; the readiness gate was the only reason live showed zero.
    g_indicatorsReady=(g_atr>0&&g_ema20>0&&g_ema50>0&&g_rsi>0);
 }
@@ -2393,7 +2428,14 @@ void UpdateVWAP()
       datetime utcAnchor=StructToTime(ud);anchor=(datetime)(utcAnchor+g_serverOffsetSec);
       if(anchor>ServerNow())anchor-=86400;
    }
-   if(CopyRates(eaSymbol,PERIOD_M1,anchor,iTime(eaSymbol,PERIOD_M1,0)-1,r)<=0)return;
+   if(CopyRates(eaSymbol,PERIOD_M1,anchor,iTime(eaSymbol,PERIOD_M1,0)-1,r)<=0)
+   {
+      // [FIX 2026-09-09] log once when the time-range CopyRates fails (tester warm-up /
+      // cold attach). The BB-mid fallback at the signal layer keeps VWAP reversion alive;
+      // this just makes the gap visible instead of silent.
+      if(!g_vwapFailLogged){g_vwapFailLogged=true;Print("VWAP anchor unavailable (CopyRates time-range returned 0) - BB-mid fallback active until data loads");}
+      return;
+   }
    double pv=0,v=0,p2=0;
    for(int i=0;i<ArraySize(r);i++)
    {
@@ -3567,7 +3609,7 @@ void UpdateRiskPeriods()
 {
    datetime n=ServerNow();int dk=DayKey(n),wk=WeekKey(n),mk=MonthKey(n);
    double eq=AccountInfoDouble(ACCOUNT_EQUITY),bal=AccountInfoDouble(ACCOUNT_BALANCE);
-   if(g_dayKey!=dk){g_dayKey=dk;g_dayAnchor=eq;g_tradesToday=0;g_consecutiveLosses=0;g_recoveryLegs=0;g_stopDay=false;ResetWindowDay();}
+   if(g_dayKey!=dk){g_dayKey=dk;g_dayAnchor=eq;g_tradesToday=0;g_consecutiveLosses=0;g_recoveryLegs=0;g_dayRealizedNet=0;g_stopDay=false;for(int wi=0;wi<WIN_COUNT;wi++){g_windowDayRealized[wi]=0;g_windowHaltedToday[wi]=false;}ResetWindowDay();}
    if(g_weekKey!=wk){g_weekKey=wk;g_weekAnchor=eq;g_stopWeek=false;}
    if(g_monthKey!=mk){g_monthKey=mk;g_monthAnchor=eq;g_stopMonth=false;}
    double d=(g_dayAnchor>0?(g_dayAnchor-eq)/g_dayAnchor*100:0);
@@ -3575,7 +3617,11 @@ void UpdateRiskPeriods()
    double m=(g_monthAnchor>0?(g_monthAnchor-eq)/g_monthAnchor*100:0);
    double floating=(bal>0?(bal-eq)/bal*100.0:0);
    g_maxDDSeen=MathMax(g_maxDDSeen,MathMax(0,d));
-   if(d>=InpDailyLossPercent||floating>=InpMaxFloatingDDPercent)g_stopDay=true;
+   // [FIX 2026-09-09] realized-loss halt: a genuinely losing day (closed trades net negative
+   // beyond the threshold of the day-anchor capital) halts immediately, even if floating
+   // equity later bounces. Percentage-based so MICRO/STANDARD/PRO all scale correctly.
+   double realizedDD=(g_dayAnchor>0?-g_dayRealizedNet/g_dayAnchor*100.0:0);
+   if(d>=InpDailyLossPercent||floating>=InpMaxFloatingDDPercent||realizedDD>=InpDailyRealizedLossPercent)g_stopDay=true;
    if(w>=InpWeeklyLossLimit)g_stopWeek=true;
    if(m>=InpMonthlyLossLimit)g_stopMonth=true;
 }
@@ -3681,6 +3727,12 @@ double OpenRiskMoney(int directionFilter=0,int windowFilter=-1)
    // [OPEN RISK] no-SL positions are NOT free risk room: conservative policy charges
    // each of them a catastrophe fallback percentage of equity (prompt.md section 20).
    double noSLPenalty=(eq>0?eq*InpCatastropheNoSLRiskPct/100.0:0);
+   // [FIX] cap the no-SL charge at the profile aggregate budget so a single
+   // open position without an SL cannot permanently zero out all trade room
+   // on small accounts. Without this, eq*5% ($5 on $100) hugely exceeds the
+   // MICRO aggregate cap ($0.75) and forces PORTFOLIO_RISK_CAP forever.
+   double noSLCap=eq*GetProfileAggregateRiskPct()/100.0;
+   if(noSLPenalty>noSLCap)noSLPenalty=noSLCap;
    for(int i=0;i<PositionsTotal();i++)
    {
       ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=eaSymbol||PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber)continue;
@@ -3854,7 +3906,7 @@ double GetProfileAggregateRiskPct()
    if(!InpAutoCapitalProfile)return InpMaxAggregateOpenRiskPct;
    switch(GetCapitalProfile())
    {
-      case CAPITAL_MICRO:return 0.75;
+      case CAPITAL_MICRO:return 2.00;
       case CAPITAL_STANDARD:return 1.50;
       case CAPITAL_PRO:return 2.50;
    }
@@ -3865,7 +3917,7 @@ double GetProfileDirectionalRiskPct()
    if(!InpAutoCapitalProfile)return InpMaxDirectionalRiskPct;
    switch(GetCapitalProfile())
    {
-      case CAPITAL_MICRO:return 0.50;
+      case CAPITAL_MICRO:return 1.00;
       case CAPITAL_STANDARD:return 1.00;
       case CAPITAL_PRO:return 1.50;
    }
@@ -3881,7 +3933,7 @@ double GetProfileWindowRiskPct()
    {
       switch(GetCapitalProfile())
       {
-         case CAPITAL_MICRO:base=0.50;break;
+         case CAPITAL_MICRO:base=1.00;break;
          case CAPITAL_STANDARD:base=0.75;break;
          case CAPITAL_PRO:base=1.50;break;
          default:base=0.75;break;
@@ -4065,6 +4117,21 @@ double CalculateLotNative(double slDist,int dir,double entry,double sl,ENUM_WIND
    room=MathMin(room,eq*GetProfileAggregateRiskPct()/100.0-OpenRiskMoney());
    room=MathMin(room,eq*GetProfileDirectionalRiskPct()/100.0-OpenRiskMoney(dir));
    room=MathMin(room,eq*GetProfileWindowRiskPct()/100.0-WindowOpenRiskMoney(w));
+   // [FIX min-lot portfolio] guarantee the one allowed min-lot scalp is never
+   // silenced by the open-risk budget math. On small gold accounts the min-lot
+   // risk (~2-5% of equity) is naturally larger than the tight MICRO aggregate
+   // budget, so a single open trade (or a capped no-SL penalty) drove room to 0
+   // and forced PORTFOLIO_RISK_CAP on every bar. The documented small-account
+   // policy (see GetProfileMinLotRiskCeilingPct) is: small accounts ALWAYS get
+   // their one min-lot scalp. Floor room at min-lot risk while we are still under
+   // the max-positions ceiling. Margin checks after this still apply.
+   if(InpAutoRiskSizing && InpAllowMinLotFallback && broker.volumeMin>0 && vol<=broker.volumeMin+1e-9)
+   {
+      double minRisk=perLot*broker.volumeMin;
+      int openCnt=0;
+      for(int i=0;i<PositionsTotal();i++){ulong t=PositionGetTicket(i);if(t>0&&PositionSelectByTicket(t)&&PositionGetString(POSITION_SYMBOL)==eaSymbol&&PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)openCnt++;}
+      if(openCnt<GetProfileMaxPositions() && room<minRisk)room=minRisk;
+   }
    double approved=FloorVolume(MathMin(vol,MathMax(0.0,room)/perLot));
    if(approved<=0){g_lastRiskReason="PORTFOLIO_RISK_CAP";return 0;}
    if(!InpAutoRiskSizing&&approved<vol-1e-9){g_lastRiskReason="FIXED_LOT_RISK_CAP";return 0;}
@@ -4217,6 +4284,20 @@ double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv,int dir=0,double entr
 bool RiskRoom(double newRisk,int dir,ENUM_WINDOW_ID w,string &why)
 {
    double eq=AccountInfoDouble(ACCOUNT_EQUITY);if(eq<=0){why="bad equity";GateHist("bad equity");return false;}
+   // [FIX] Keep RiskRoom consistent with CalculateLotNative's min-lot floor. On MICRO the
+   // single 0.01-lot scalp risks ~2.5-5% of equity, which exceeds the tight aggregate/
+   // directional/window caps even with ZERO open positions. That made RiskRoom reject every
+   // small-account scalp AFTER the solver had already approved it (ENTRY_GATE "aggregate
+   // risk cap" with risk=SIZE_OK). The documented small-account policy
+   // (GetProfileMinLotRiskCeilingPct) guarantees the one allowed min-lot scalp, and CanEnter
+   // already enforces the position ceiling, so once we are still within the allowed position
+   // count the budget gates must not veto the solver-approved scalp.
+   if(InpAutoRiskSizing && InpAllowMinLotFallback && GetProfileMaxPositions()>0)
+   {
+      int own=0;
+      for(int i=0;i<PositionsTotal();i++){ulong t=PositionGetTicket(i);if(t>0&&PositionSelectByTicket(t)&&PositionGetString(POSITION_SYMBOL)==eaSymbol&&PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)own++;}
+      if(own<GetProfileMaxPositions())return true;
+   }
    // [CAPITAL ENGINE] profile limits in Auto mode; identical legacy inputs when false.
    if((OpenRiskMoney()+newRisk)/eq*100.0>GetProfileAggregateRiskPct()){why="aggregate risk cap";GateHist("aggregate risk cap");return false;}
    if((OpenRiskMoney(dir)+newRisk)/eq*100.0>GetProfileDirectionalRiskPct()){why="direction risk cap";GateHist("direction risk cap");return false;}
@@ -4464,6 +4545,10 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
 {
    if(!EntrySafetyAllowed(w,why))return false;
    if(!g_indicatorsReady){why="indicator history not ready";return false;}
+   // [FIX 2026-09-09] warm-up: no NEW entries for the first InpWarmupBars M1 bars after start,
+   // so MTF/M5 evidence stabilizes and we never trade on half-loaded higher-TF data. Skipped in
+   // the Strategy Tester (history is fully loaded on init).
+   if(!MQLInfoInteger(MQL_TESTER)&&InpWarmupBars>0&&g_barsSeen<InpWarmupBars){why="warmup (bars "+IntegerToString(g_barsSeen)+"/"+IntegerToString(InpWarmupBars)+")";return false;}
    if(g_executionUncertain){why="execution outcome uncertain: reconcile orders before resuming";return false;}
    if(InpEnableMobileCommands&&!MQLInfoInteger(MQL_TESTER)&&GlobalVariableCheck(ControlKey("ENABLED"))&&GlobalVariableGet(ControlKey("ENABLED"))==0)
    {why="mobile pause";return false;}
@@ -4582,6 +4667,9 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       return true;
    }
    RefreshWindowGating(w);if(g_ws[w].disabled){why="window expectancy disabled";GateHist("window expectancy disabled");return false;}
+   // [FIX 2026-09-09] per-window daily loss breaker: if THIS window's own realized loss for
+   // the day has crossed InpWindowDailyLossPercent, halt ONLY this window (other windows keep trading).
+   if(w>WIN_NONE&&w<WIN_COUNT&&g_windowHaltedToday[(int)w]){why="window daily loss halt";GateHist("window daily loss halt");return false;}
    if(IsDisorder()){why="market disorder";GateHist("market disorder");return false;}
    if(g_slipCnt>=5&&g_slipAvg>AdaptiveMaxAvgSlippagePts()){why="slippage quality gate";GateHist("slippage quality gate");return false;}
    if(g_lastSlipPts>=AdaptiveExtremeSlippagePts()&&ServerNow()<g_disorderUntil){why="last fill slippage extreme";GateHist("last fill slippage extreme");return false;}
@@ -4899,6 +4987,16 @@ void TryArm()
    if(InpSimpleScalpMode)
    {
       t1=ScalpTarget1(dir,entry0);
+      // [FIX 2026-09-09] Guarantee TP1 is at least MIN_TP1_R multiples of the ACTUAL
+      // (possibly spread-floored) SL, so widening the SL to clear the spread can never
+      // drop the scalp below 1R. Without this the spread-floor SL change could turn a
+      // 1.3R scalp into a sub-1R bleed on wide-spread bars. Applies to every profile.
+      {
+         double slDistActual=MathAbs(entry0-sl);
+         double t1Min=entry0+dir*MathMax(SCALP_TP1_ATR*g_atr, MIN_TP1_R*slDistActual);
+         double t1c=PriceNorm(t1Min);
+         if(MathAbs(t1c-entry0)>MathAbs(t1-entry0))t1=t1c;
+      }
       // single-target scalp: TP2/TP3 trail beyond for the runner
       // (0.40 total / 0.75 total / 1.15 total ATR - authoritative profile)
       double atr2=g_atr;   // [B8]
@@ -5063,6 +5161,15 @@ void TryRecovery()
    if(g_entryOrder>0||CountOwnPendings()>0)return;
    if(!ExternalDataReady(why)||(InpRequireOptionsData&&!OptionsDataUsable()))return;
    if(RegimeRiskMultiplier()<=0)return;
+   // [FIX 2026-09-09] no reversal recovery when the day is already bleeding: if realized
+   // day net loss exceeds 50% of the realized daily-halt threshold, skip recovery entirely.
+   // Counter-trend legs into a bleeding day compound the bleed; the daily breaker stops the
+   // day at 100% of the threshold, this halves the damage before it gets there.
+   if(g_dayRealizedNet<0.0&&g_dayAnchor>0.0)
+   {
+      double recHalt=g_dayAnchor*InpDailyRealizedLossPercent/100.0;
+      if(-g_dayRealizedNet>=0.5*recHalt)return;
+   }
    if(g_lastLossDir==0||g_lastLossTime==0)return;
    datetime now=ServerNow();
    if(g_recoveryLegs>=InpRecoveryMaxLegs)return;
@@ -5300,7 +5407,7 @@ void FinalizeWindowTrade(int idx,double net,double gross,double costs)
 
 void LearnCommission(double dealComm,double dealVol)
 {
-   double c=MathAbs(dealComm),v=dealVol;if(c<=0||v<=0)return;double oneSide=c/v;double rt=2.0*oneSide;g_commissionRTPerLot=(g_commissionRTPerLot<=0?rt:0.90*g_commissionRTPerLot+0.10*rt);
+   double c=MathAbs(dealComm),v=dealVol;if(c<=0||v<=0)return;double oneSide=c/v;double rt=2.0*oneSide;g_commissionRTPerLot=(g_commissionRTPerLot<=0?rt:0.70*g_commissionRTPerLot+0.30*rt);   // [FIX 2026-09-09] faster decay 0.90/0.10 -> 0.70/0.30: ~7 deals to converge on a broker commission change instead of ~23
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
@@ -5392,6 +5499,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       if(!still&&pidx>=0)
       {
          double finalNet=g_ps[pidx].realizedNet;
+         g_dayRealizedNet+=finalNet;   // [FIX 2026-09-09] feed the realized daily-loss breaker
+         // [FIX 2026-09-09] per-WINDOW realized loss breaker: track this window's own net,
+         // and if it crosses the per-window threshold vs day-start equity, halt ONLY this window.
+         ENUM_WINDOW_ID ww=g_ps[pidx].window;
+         if(ww>WIN_NONE&&ww<WIN_COUNT)
+         {
+            g_windowDayRealized[(int)ww]+=finalNet;
+            double wLoss=(g_dayAnchor>0?-g_windowDayRealized[(int)ww]/g_dayAnchor*100.0:0);
+            if(wLoss>=InpWindowDailyLossPercent)g_windowHaltedToday[(int)ww]=true;
+         }
          if(finalNet<0 && !g_ps[pidx].recovery)
          {
             // Realized base-strategy loss: open ONE gated reversal opportunity.
@@ -5591,6 +5708,10 @@ void WritePerformanceReport()
    FileWrite(f,"equity_usd",DoubleToString(GetEquityUSD(),2));
    FileWrite(f,"average_effective_risk_pct",DoubleToString(GetEffectiveTradeRiskPct(WIN_NONE,false),3));
    FileWrite(f,"average_actual_R",DoubleToString(OverallNetR(),4));
+   //--- [FIX 2026-09-09] per-signal-mode P/L breakdown (which setup actually pays)
+   string setupNames[6]={"setup_ema_pullback","setup_vwap_reversion","setup_london_breakout","setup_ny_momentum","setup_complex","setup_recovery"};
+   for(int si=0;si<6;si++)
+      FileWrite(f,setupNames[si],IntegerToString(g_setupStats[si].trades)+"/"+IntegerToString(g_setupStats[si].wins)+"W/"+IntegerToString(g_setupStats[si].losses)+"L netR="+DoubleToString(g_setupStats[si].netR,2));
    FileWrite(f,"window_expectancy_R_sydney",DoubleToString(WindowExpectancyR(WIN_SYDNEY),4));
    FileWrite(f,"window_expectancy_R_tokyo",DoubleToString(WindowExpectancyR(WIN_TOKYO),4));
    FileWrite(f,"window_expectancy_R_london",DoubleToString(WindowExpectancyR(WIN_LONDON),4));
@@ -5926,6 +6047,16 @@ void DashUpdate(bool force=false)
    DashRow("R_EQ",1,yR,"Eq "+DoubleToString(eq,2)+"  Bal "+DoubleToString(bal,2)+" "+broker.currency,C_TXT);
    DashRow("R_DD",1,yR,"Day DD "+DoubleToString(dd,2)+"%/"+DoubleToString(InpDailyLossPercent,2)+"%  Wk "+DoubleToString((g_weekAnchor>0?(g_weekAnchor-eq)/g_weekAnchor*100:0),2)+"%",
            (dd>=InpDailyLossPercent?C_DN_TXT:(dd>InpMaxFloatingDDPercent*0.7?C_WARN_TXT:C_TXT)));
+   // [FIX 2026-09-09] realized daily-loss circuit breaker status (halts the day if net closed P/L hits threshold)
+   double realDD=(g_dayAnchor>0?-g_dayRealizedNet/g_dayAnchor*100.0:0);
+   DashRow("R_RLZ",1,yR,"Day Realized "+DoubleToString(g_dayRealizedNet,2)+" ("+DoubleToString(realDD,2)+"%/ "+DoubleToString(InpDailyRealizedLossPercent,2)+"%)",
+           (realDD>=InpDailyRealizedLossPercent?C_DN_TXT:C_TXT2));
+   // [FIX 2026-09-09] per-window halt indicator: list any session halted by its own daily loss
+   {
+      string halted="";
+      for(int wi=1;wi<WIN_COUNT;wi++)if(g_windowHaltedToday[wi]){halted+=(halted!=""?", ":"")+WindowName((ENUM_WINDOW_ID)wi);}
+      if(halted!="")DashRow("R_WHLT",1,yR,"Window HALT: "+halted,C_DN_TXT);
+   }
    DashRow("R_MRG",1,yR,"Margin "+DoubleToString(margin,2)+" ("+DoubleToString(marginPct,1)+"%)  Free "+DoubleToString(freeM,2),(marginPct>50?C_WARN_TXT:C_TXT2));
    DashRow("R_POS",1,yR,"Positions "+IntegerToString(CountOwnPositions())+"/"+IntegerToString(GetProfileMaxPositions())+"  Lots "+DoubleToString(SumOwnLots(),2),C_TXT);
    DashRow("R_RISK",1,yR,"Risk $"+DoubleToString(openRisk,2)+" ("+DoubleToString(riskPct,2)+"%/"+DoubleToString(InpMaxAggregateOpenRiskPct,2)+"%)",(riskPct>InpMaxAggregateOpenRiskPct?C_DN_TXT:C_TXT));
