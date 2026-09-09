@@ -2510,7 +2510,7 @@ void EvaluateScalpSignal()
    //--- a zero-signal backtest shows exactly which input is dead (0 cache = M5/H1 data
    //--- never arrived, VWAP=0 = anchor problem, etc.)
    static long diagN=0;diagN++;
-   if(MQLInfoInteger(MQL_TESTER)&&(diagN%200)==1)
+   if(MQLInfoInteger(MQL_TESTER)&&(diagN%20000)==1)   // per-tick eval: log sparsely
       Print("SIGDIAG bars=",diagN," ATR=",DoubleToString(g_atr,2)," EMA20=",DoubleToString(g_ema20,broker.digits),
             " M5e20=",DoubleToString(g_m5e20,broker.digits)," M5e50=",DoubleToString(g_m5e50,broker.digits),
             " M5adx=",DoubleToString(g_m5adx,1)," RSI=",DoubleToString(g_rsi,1),
@@ -6048,23 +6048,29 @@ void OnTick()
    ProcessMobileCommands();         // mobile command bridge (cheap: scans orders)
    RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();IsNewBar();UpdateIndicators();RefreshFMPMacro(false);SR_Rebuild();   // [SR] throttled; before signal evaluation
    datetime signalBar=iTime(eaSymbol,PERIOD_M1,1);
-   if(g_indicatorsReady&&signalBar>0&&g_indicatorBar==signalBar&&g_signalBar!=signalBar){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);
-      //--- [SIGNAL QUALITY] per-bar refresh: structure, volume states, regimes (sections 3/7/8)
+   bool newEvalBar=(g_indicatorsReady&&signalBar>0&&g_indicatorBar==signalBar&&g_signalBar!=signalBar);
+   if(newEvalBar){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);g_signalBar=signalBar;}
+   if(g_indicatorsReady)
+   {
+      //--- [FIX] evaluate the signal on EVERY TICK when indicators are ready: the old
+      //--- once-per-bar gate combined with the per-bar block condition meant a bar was
+      //--- skipped entirely whenever its first tick raced the data load - and the stale
+      //--- g_scalpSignal (usually 0) was what TryArm kept seeing. The setup conditions
+      //--- read only CLOSED bars, so per-tick evaluation is stable and cheap.
       UpdateStructureState();
       UpdateVolumeEngine();
       UpdateDirectionRegime();
       UpdateEnvironmentRegime();
-      // Bollinger 20,2 on M1 closes (manual std over 20 bars)
-      double closes[20];   // mean/std are order-independent; no series flag needed
+      double closes[20];
       if(CopyClose(eaSymbol,PERIOD_M1,1,20,closes)==20)
       {
          double sum=0;for(int k=0;k<20;k++)sum+=closes[k];g_bbMid=sum/20.0;
          double v=0;for(int k=0;k<20;k++){double d=closes[k]-g_bbMid;v+=d*d;}
-         double sd=MathSqrt(v/20.0);
-         g_bbUp=g_bbMid+2.0*sd;g_bbLo=g_bbMid-2.0*sd;
+         g_bbUp=g_bbMid+2.0*MathSqrt(v/20.0);g_bbLo=g_bbMid-2.0*MathSqrt(v/20.0);
       }
-      EvaluateScalpSignal();g_signalBar=signalBar;
-   }else if(g_indicatorsReady)EvaluateFilters();
+      EvaluateScalpSignal();
+      g_signalBar=signalBar;
+   }
    if((g_stopDay||g_stopWeek||g_stopMonth)&&InpBreakerAction==BREAKER_CLOSE_ALL)EmergencyCloseAll();
    EnforceSwapFlat();
    ManageAllPositions();
