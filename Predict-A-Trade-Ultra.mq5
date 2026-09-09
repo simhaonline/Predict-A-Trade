@@ -37,6 +37,15 @@ enum ENUM_BREAKER_ACTION  { BREAKER_BLOCK_ONLY=0, BREAKER_CLOSE_ALL=1 };
 enum ENUM_HV_MODE         { HV_OFF=0, HV_AUTO=1, HV_FORCE_GATED=2 };
 enum ENUM_SR_MODE         { SR_ADVISORY=0, SR_SOFT_FILTER=1, SR_HARD_FILTER=2 };
 enum ENUM_LADDER_MODE     { LADDER_FAVOR_TP1=0, LADDER_FAVOR_RUNNER=1, LADDER_PROPORTIONAL=2 };
+//--- [CAPITAL ENGINE] account capital tier (prompt.md section 4). Classification uses
+//--- USD-EQUIVALENT EQUITY ONLY; risk money itself stays in account currency.
+enum ENUM_CAPITAL_PROFILE
+{
+   CAPITAL_MICRO=0,      // $50  <= equityUSD <  $500
+   CAPITAL_STANDARD=1,   // $500 <= equityUSD < $5000
+   CAPITAL_PRO=2         // equityUSD >= $5000
+};
+
 enum ENUM_SR_SRC
 {
    SRSRC_PIVOT    = 1,
@@ -66,6 +75,28 @@ enum ENUM_WINDOW_ID
    WIN_COUNT=11
 };
 
+//--- [CAPITAL ENGINE] forward declarations (definition order independence)
+int AdaptiveDeviationPoints();
+bool PreflightNewTrade(MqlTradeRequest &request,MqlTradeCheckResult &check,string &reason);
+double CalculateRealTradeRiskMoney(int direction,double volume,double entry,double stopLoss);
+bool CalcBrokerPnL(int direction,double volume,double openPrice,double closePrice,double &pnl);
+double GetEffectiveTradeRiskPct(ENUM_WINDOW_ID window,bool highVolatility);
+double GetConservativeCapitalBase();
+double GetProfileBaseRiskPct();
+double GetProfileMinLotRiskCeilingPct();
+double WindowRiskMultiplier(ENUM_WINDOW_ID w);
+ENUM_CAPITAL_PROFILE GetCapitalProfile();
+string CapitalProfileName(ENUM_CAPITAL_PROFILE p);
+double GetProfileAggregateRiskPct();
+double GetProfileDirectionalRiskPct();
+double GetProfileWindowRiskPct();
+int GetProfileMaxPositions();
+double GetAccountCurrencyToUSD();
+double GetEquityUSD();
+double ExpectedAllInCost(double lots);
+double PriceMoveMoney(double dist,double lots);
+
+
 //====================================================================
 // INPUTS
 //====================================================================
@@ -79,29 +110,52 @@ input double InpDailyLossPercent          = 2.5;
 input double InpMaxFloatingDDPercent      = 3.0;
 input double InpWeeklyLossLimit           = 6.0;
 input double InpMonthlyLossLimit          = 10.0;
-input double InpRiskPercent               = 0.35;
+input double InpRiskPercent               = 0.35;      // LEGACY/MANUAL: base trade risk when InpAutoCapitalProfile=false
 input double InpRiskStepDownOnDD          = 0.15;
 input int    InpMaxConsecutiveLosses      = 3;      // pause only after 3 straight; risk decays 30% per loss before that
 input int    InpMaxTradesPerDay           = 25;
 input bool   InpAllowMinLotFallback       = true;      // size to broker min lot when risk-% lots < min (small accounts)
-input double InpMinLotMaxRiskPct          = 1.5;       // min-lot trade allowed only if its risk <= this % of balance
+input double InpMinLotMaxRiskPct          = 1.5;       // LEGACY/MANUAL: min-lot ceiling when AutoCapitalProfile=false (else profile ceiling)
 input double InpMaxAggregateOpenRiskPct   = 2.5;
 input double InpMaxDirectionalRiskPct     = 1.5;
 input ENUM_BREAKER_ACTION InpBreakerAction= BREAKER_CLOSE_ALL;
 input bool   InpNoMartingale              = true;      // invariant; retained for audit visibility
 input bool   InpNoAveragingDown           = true;      // invariant; never add to losing exposure
 
+input group "=== ADAPTIVE CAPITAL ENGINE (prompt.md 4-12, 43) ==="
+input bool   InpAutoCapitalProfile        = true;      // FALSE = legacy manual mode: InpRiskPercent/InpMax* inputs drive sizing exactly as before
+input bool   InpAutoRiskSizing            = true;      // FALSE = legacy: InpLotSize used directly (manual/debug). TRUE: InpLotSize ignored for sizing.
+input bool   InpUseAbsoluteLotEmergencyCap= false;     // legacy 1.20-lot cap only when TRUE + AutoRiskSizing
+input double InpEmergencyMaxTotalLots     = 0.0;       // emergency absolute lot ceiling (0 = disabled)
+input double InpRiskFloorPct              = 0.10;      // absolute risk floor AFTER modifiers; never above profile base
+input double InpMinTP1NetRiskPct          = 10.0;      // TP1 net-profit viability = % of INITIAL TRADE RISK (Auto mode)
+input double InpMinTP2NetRiskPct          = 20.0;      // TP2 viability = % of initial trade risk
+input double InpMinTP3NetRiskPct          = 30.0;      // TP3 viability = % of initial trade risk
+input bool   InpUseRiskRelativeNetProfitGate = true;   // FALSE = legacy fixed-money gates (InpMinNetProfitTP*Money)
+input bool   InpUseRExpectancyGating      = true;      // TRUE = window gating on rolling R expectancy (Auto mode)
+input double InpDisableExpectancyR        = -0.10;     // R expectancy below this disables a non-primary window
+input double InpRiskReduceExpectancyR     = 0.05;      // R expectancy below this reduces window risk
+input double InpMaxNewTradeMarginPct      = 20.0;      // new-trade margin <= this % of equity (OrderCalcMargin)
+input double InpMinFreeMarginReservePct   = 50.0;      // projected free margin must stay >= this % of equity
+input bool   InpUseAdaptiveSpreadGate     = true;      // relative multi-condition spread gate (warmup = legacy fixed)
+input double InpMaxSpreadToATRPct         = 20.0;      // spread/ATR ceiling % (adaptive gate)
+input double InpMaxSpreadPercentileAdaptive = 90.0;    // spread percentile ceiling (adaptive gate)
+input double InpSpreadBaselineMultiplier  = 2.0;       // spread vs rolling-average spike ratio (adaptive gate)
+input int    InpSpreadWarmupSamples       = 30;        // ticks before the adaptive spread gate arms
+input double InpRecoverySpreadQualityMultiplier = 0.80; // recovery requires this x normal spread allowance (stricter)
+input double InpCatastropheNoSLRiskPct    = 5.0;       // no-SL open positions count as this % risk (conservative policy)
+
 input group "=== BROKER / COST MODEL ==="
-input int    InpMaxSpreadPoints           = 35;      // hard cap; Xelans ECN gold runs 35-45pt
+input int    InpMaxSpreadPoints           = 35;      // hard sanity cap; ADAPTIVE GATE primary when InpUseAdaptiveSpreadGate=true
 input double InpSpreadSpikeRatio          = 2.0;
 input double InpMaxSpreadPercentile       = 90.0;     // p85 was below this broker's normal spread range
 input int    InpMaxSlippagePoints         = 25;
 input double InpCommissionPerLotRTFallback= 7.00;      // account-currency round trip / lot fallback
 input double InpExpectedSlipPtsFallback   = 3.5;
 input double InpMaxCostToTP1Pct           = 40.0;     // was 35: ECN spread pushed cost ratio over 35
-input double InpMinNetProfitTP1Money      = 0.30;
-input double InpMinNetProfitTP2Money      = 0.50;
-input double InpMinNetProfitTP3Money      = 0.70;
+input double InpMinNetProfitTP1Money      = 0.30;      // LEGACY/MANUAL: TP1 fixed money gate when InpUseRiskRelativeNetProfitGate=false
+input double InpMinNetProfitTP2Money      = 0.50;      // LEGACY/MANUAL: TP2 fixed money gate when InpUseRiskRelativeNetProfitGate=false
+input double InpMinNetProfitTP3Money      = 0.70;      // LEGACY/MANUAL: TP3 fixed money gate when InpUseRiskRelativeNetProfitGate=false
 input int    InpOrderRetry                = 2;
 
 input group "=== RISK-REWARD VALIDATION ==="
@@ -113,7 +167,7 @@ input ENUM_EXECUTION_MODE InpExecutionMode= EXEC_DIRECTIONAL;
 input int    InpStraddleLayers            = 1;
 input double InpLayerStepATR              = 0.35;
 input int    InpMaxConcurrentPositions    = 3;
-input double InpMaxTotalLots              = 1.20;
+input double InpMaxTotalLots              = 1.20;      // LEGACY/MANUAL: absolute cap only when InpUseAbsoluteLotEmergencyCap=true (never in Auto mode)
 input bool   InpArmWhileInTrade           = true;
 input bool   InpScaleIn                   = false;
 input int    InpMinSecondsBetweenEntries  = 20;     // was 120
@@ -127,7 +181,7 @@ input double InpDistance                  = 1.00;
 input bool   InpUseATRForDistance         = true;
 input double InpATRMultiplier             = 0.22;
 input double InpLayerSpacingATR           = 0.25;
-input double InpLotSize                   = 0.05;
+input double InpLotSize                   = 0.05;      // LEGACY/MANUAL: fixed lot ONLY when InpAutoRiskSizing=false (manual/debug)
 
 input group "=== FILTERS / SMC ==="
 input ENUM_FILTER_MODE InpFilterMode      = FILTER_SCORING;
@@ -286,8 +340,8 @@ input int    InpRecoveryMaxAgeSec         = 900;       // recovery opportunity e
 input double InpRecoveryMaxSpreadPts      = 35;        // tighter spread cap for recovery entries
 
 input group "=== SLIPPAGE / SWAP PROTECTION ==="
-input double InpMaxAverageSlippagePoints  = 15.0;     // 18pt avg is realistic for gold ECN fills; 10 blocked every re-entry
-input double InpExtremeSlippagePoints     = 25.0;     // 30pt on gold = genuinely pathological fill; pre-trade guard covers spikes
+input double InpMaxAverageSlippagePoints  = 15.0;     // LEGACY/MANUAL slippage quality gate (adaptive deviation governs entries in Auto mode)
+input double InpExtremeSlippagePoints     = 25.0;     // emergency/pathological fallback cap (adaptive deviation governs entries)
 input int    InpStopLevelBufferPoints     = 5;        // Phase 2.4/4.1: safety buffer above broker stops/freeze level
 input bool   InpRespectStopLevel          = true;     // enforce stops/freeze distance on every SR/proposed price
 input bool   InpValidateSymbolOnInit      = true;     // fail fast when the symbol is not fully tradeable
@@ -303,8 +357,8 @@ input group "=== PERFORMANCE SELF-GATING / A-B ==="
 input bool   InpEnablePerformanceGating   = true;
 input int    InpPerfMinTrades             = 20;
 input int    InpPerfRollingTrades         = 40;
-input double InpDisableExpectancyMoney    = -0.20;
-input double InpRiskReduceExpectancyMoney = 0.10;
+input double InpDisableExpectancyMoney    = -0.20;     // LEGACY/MANUAL: money expectancy disable when InpUseRExpectancyGating=false
+input double InpRiskReduceExpectancyMoney = 0.10;      // LEGACY/MANUAL: money expectancy reduce when InpUseRExpectancyGating=false
 input double InpWeakWindowRiskMultiplier  = 0.50;
 input bool   InpAB_EnableBase             = true;
 input bool   InpAB_EnableHighVol          = true;
@@ -1409,11 +1463,18 @@ void ProcessMobileCommands()
       else if(StringFind(comment,"RISK_")>=0)
       {
          double risk=StringToDouble(StringSubstr(comment,5));
-         if(risk>0 && risk<=5.0)   // safety ceiling: never above 5%
+         // RISK_0 = safe clear behavior (section 9): clears any existing override.
+         if(risk==0)
+         {
+            GlobalVariableSet("PAT_RISK_OVERRIDE",0);
+            DeleteOrderSafe(ticket);
+            Print("Mobile Command: Risk override CLEARED (RISK_0)");
+         }
+         else if(risk>0 && risk<=5.0)   // request ceiling: the risk engine still clamps to live limits
          {
             GlobalVariableSet("PAT_RISK_OVERRIDE",risk);
             DeleteOrderSafe(ticket);
-            Print("Mobile Command: Risk set to ",risk);
+            Print("Mobile Command: Risk REQUESTED ",risk," (engine clamps to profile/derived ceilings)");
          }
       }
    }
@@ -1444,6 +1505,10 @@ struct BrokerProfile
    ENUM_ACCOUNT_MARGIN_MODE marginMode;
    ENUM_ACCOUNT_TRADE_MODE tradeMode;
    bool hedging;
+   //--- [BROKER ENGINE] richer specs: tick value can differ for profit vs loss legs;
+   //--- volume limit is the broker's directional open+pending cap (distinct from max).
+   double tickValueProfit,tickValueLoss,volumeLimit;
+   ENUM_SYMBOL_CALC_MODE calcMode;
 };
 
 struct WindowStats
@@ -1456,6 +1521,9 @@ struct WindowStats
    int recentCount,recentIdx;
    double obsATRRatioSum,obsVolRatioSum;
    bool disabled;
+   //--- [PERFORMANCE GATING] rolling recent-R history (prompt.md section 25).
+   double recentR[64];
+   int recentRCount,recentRIdx;
 };
 
 struct PositionState
@@ -1617,7 +1685,7 @@ color C_SYD_DIM=C'20,60,90',C_TOK_DIM=C'50,32,90',C_LON_DIM=C'90,54,0',C_NY_DIM=
 #define L_SECTIONS 3
 #define L_ROWS     16
 #define R_SECTIONS 4
-#define R_ROWS     24      // 22 legacy + 2 SR rows [SR]
+#define R_ROWS     28      // 22 legacy + 2 SR rows [SR] + 4 capital-engine rows
 int g_font=7,g_fontPx=9,g_dpi=96;
 double g_dpiScale=1.0;
 int g_rh=16,g_hdrH=30,g_colW=300,g_pad=12,g_gap=14,g_panelW=0;
@@ -1693,6 +1761,12 @@ bool InitBroker()
    broker.volumeStep=SymbolInfoDouble(eaSymbol,SYMBOL_VOLUME_STEP);
    broker.swapLong=SymbolInfoDouble(eaSymbol,SYMBOL_SWAP_LONG);
    broker.swapShort=SymbolInfoDouble(eaSymbol,SYMBOL_SWAP_SHORT);
+   //--- [BROKER ENGINE] extended specs (prompt.md section 13): profit/loss tick values
+   //--- can differ on some brokers; volume limit caps DIRECTIONAL open+pending volume.
+   broker.tickValueProfit=SymbolInfoDouble(eaSymbol,SYMBOL_TRADE_TICK_VALUE_PROFIT);
+   broker.tickValueLoss=SymbolInfoDouble(eaSymbol,SYMBOL_TRADE_TICK_VALUE_LOSS);
+   broker.volumeLimit=SymbolInfoDouble(eaSymbol,SYMBOL_VOLUME_LIMIT);
+   broker.calcMode=(ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_CALC_MODE);
    broker.digits=(int)SymbolInfoInteger(eaSymbol,SYMBOL_DIGITS);
    broker.stopsLevel=(int)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_STOPS_LEVEL);
    broker.freezeLevel=(int)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_FREEZE_LEVEL);
@@ -2046,7 +2120,33 @@ void PushSlippage(double s)
    g_lastSlipPts=s;g_slipBuf[g_slipIdx]=s;g_slipIdx=(g_slipIdx+1)%SLIP_SAMPLES;if(g_slipCnt<SLIP_SAMPLES)g_slipCnt++;
    double z=0;for(int i=0;i<g_slipCnt;i++)z+=g_slipBuf[i];g_slipAvg=(g_slipCnt?z/g_slipCnt:0);
 }
-double SlippagePercentile(){ return PercentileRank(g_slipBuf,g_slipCnt,g_lastSlipPts); }//====================================================================
+double SlippagePercentile(){ return PercentileRank(g_slipBuf,g_slipCnt,g_lastSlipPts); }
+
+//--- [SPREAD] adaptive multi-condition relative gate (section 26). Reuses the existing
+//--- rolling spread buffer/avg/percentile; warmup falls back to the legacy fixed cap.
+//--- Returns true when spread conditions allow a NEW ENTRY. Emergency closes never call this.
+bool AdaptiveSpreadOK(double atr,string &why)
+{
+   if(!InpUseAdaptiveSpreadGate)return true;   // legacy behavior only
+   if(g_spreadCnt<InpSpreadWarmupSamples)return true;   // warmup: legacy fixed gate governs
+   if(atr<=0){why="spread: ATR unavailable";return false;}
+   double spPts=SpreadPoints();
+   double spreadPrice=spPts*broker.point;
+   double spreadToATRPct=spreadPrice/atr*100.0;
+   double spp=SpreadPercentile();
+   // (1) relative ATR condition
+   if(spreadToATRPct>InpMaxSpreadToATRPct){why="SPREAD_RELATIVE_HIGH";g_spreadRejects++;return false;}
+   // (2) distribution percentile condition (adaptive ceiling)
+   if(spp>InpMaxSpreadPercentileAdaptive){why="SPREAD_RELATIVE_HIGH";g_spreadRejects++;return false;}
+   // (3) spike vs rolling baseline (existing average reused; NOT a self-normalizing
+   // widening allowance - the fixed sanity cap still binds above).
+   if(g_spreadAvg>0&&spPts>g_spreadAvg*InpSpreadBaselineMultiplier){why="SPREAD_RELATIVE_HIGH";g_spreadRejects++;return false;}
+   // Absolute last-resort sanity cap: legacy fixed ceiling (broker-independent guard).
+   if(spPts>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";g_spreadRejects++;return false;}
+   return true;
+}
+
+//====================================================================
 // FMP MACRO / NEWS (stable REST; credentials obfuscated, runtime-decoded)
 //====================================================================
 // Credentials are stored as +3 ASCII cipher literals so no API key or URL
@@ -2790,6 +2890,21 @@ double WindowExpectancy(ENUM_WINDOW_ID w)
    if(w<=WIN_NONE||w>=WIN_COUNT||g_ws[w].recentCount<=0)return 0;double s=0;for(int i=0;i<g_ws[w].recentCount;i++)s+=g_ws[w].recentNet[i];return s/g_ws[w].recentCount;
 }
 
+//--- [PERFORMANCE GATING] rolling recent-R expectancy (section 25)
+double WindowExpectancyR(ENUM_WINDOW_ID w)
+{
+   if(w<=WIN_NONE||w>=WIN_COUNT||g_ws[w].recentRCount<=0)return 0;
+   double s=0;for(int i=0;i<g_ws[w].recentRCount;i++)s+=g_ws[w].recentR[i];
+   return s/g_ws[w].recentRCount;
+}
+
+void PushRecentR(ENUM_WINDOW_ID w,double r)
+{
+   if(w<=WIN_NONE||w>=WIN_COUNT)return;
+   int cap=64;int i=g_ws[w].recentRIdx%cap;g_ws[w].recentR[i]=r;g_ws[w].recentRIdx=(i+1)%cap;
+   if(g_ws[w].recentRCount<cap)g_ws[w].recentRCount++;
+}
+
 double WindowAvgR(ENUM_WINDOW_ID w)
 {
    if(w<=WIN_NONE||w>=WIN_COUNT||g_ws[w].trades<=0)return 0;return g_ws[w].rSum/g_ws[w].trades;
@@ -2807,25 +2922,57 @@ void RefreshWindowGating(ENUM_WINDOW_ID w)
    // Primary sessions remain eligible by design. Weak expectancy is handled by
    // WindowRiskMultiplier rather than deleting an entire market session.
    if(InpNeverDisablePrimarySessions && IsPrimarySessionWindow(w))return;
+   // [PERFORMANCE GATING] rolling R expectancy in Auto mode (section 25);
+   // legacy money expectancy retained for manual/back-compatible mode.
+   if(InpUseRExpectancyGating&&InpAutoCapitalProfile)
+   {
+      if(WindowExpectancyR(w)<=InpDisableExpectancyR)g_ws[w].disabled=true;
+      return;
+   }
    if(WindowExpectancy(w)<=InpDisableExpectancyMoney)g_ws[w].disabled=true;
 }
 
 double WindowRiskMultiplier(ENUM_WINDOW_ID w)
 {
    RefreshWindowGating(w);if(g_ws[w].disabled)return 0;
-   if(InpEnablePerformanceGating&&g_ws[w].trades>=InpPerfMinTrades&&WindowExpectancy(w)<InpRiskReduceExpectancyMoney)return InpWeakWindowRiskMultiplier;
+   if(InpEnablePerformanceGating&&g_ws[w].trades>=InpPerfMinTrades)
+   {
+      if(InpUseRExpectancyGating&&WindowExpectancyR(w)<InpRiskReduceExpectancyR)return InpWeakWindowRiskMultiplier;
+      if(!InpUseRExpectancyGating&&WindowExpectancy(w)<InpRiskReduceExpectancyMoney)return InpWeakWindowRiskMultiplier;
+   }
    return 1.0;
+}
+
+//--- section 14: OrderCalcProfit is the AUTHORITATIVE SL-risk calculator.
+bool CalcBrokerPnL(int direction,double volume,double openPrice,double closePrice,double &pnl)
+{
+   pnl=0;
+   if(volume<=0||openPrice<=0||closePrice<=0)return false;
+   ENUM_ORDER_TYPE t=(direction>0?ORDER_TYPE_BUY:ORDER_TYPE_SELL);
+   ResetLastError();
+   if(!OrderCalcProfit(t,eaSymbol,volume,openPrice,closePrice,pnl))return false;
+   if(pnl==0)return false;   // broker refused/returned nothing -> use fallback
+   return true;
 }
 
 double OpenRiskMoney(int directionFilter=0)
 {
    double sum=0;
+   double eq=AccountInfoDouble(ACCOUNT_EQUITY);
+   // [OPEN RISK] no-SL positions are NOT free risk room: conservative policy charges
+   // each of them a catastrophe fallback percentage of equity (prompt.md section 20).
+   double noSLPenalty=(eq>0?eq*InpCatastropheNoSLRiskPct/100.0:0);
    for(int i=0;i<PositionsTotal();i++)
    {
       ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=eaSymbol||PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber)continue;
       int dir=(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY?1:-1);if(directionFilter!=0&&dir!=directionFilter)continue;
-      double sl=PositionGetDouble(POSITION_SL),op=PositionGetDouble(POSITION_PRICE_OPEN),v=PositionGetDouble(POSITION_VOLUME);if(sl<=0)continue;
-      sum+=PriceMoveMoney(op-sl,v);
+      double sl=PositionGetDouble(POSITION_SL),op=PositionGetDouble(POSITION_PRICE_OPEN),v=PositionGetDouble(POSITION_VOLUME);
+      if(sl<=0){sum+=noSLPenalty;continue;}   // missing SL = unbounded risk, never zero
+      // Broker-native estimate first (returns account-currency loss at SL);
+      // tick-size/tick-value fallback keeps the same semantics if the call fails.
+      double pnl=0;
+      if(CalcBrokerPnL(dir,v,op,sl,pnl))sum+=MathAbs(pnl);
+      else sum+=PriceMoveMoney(op-sl,v);
    }
    return sum;
 }
@@ -2845,25 +2992,551 @@ int CountOwnPendings()
    int n=0;for(int i=0;i<OrdersTotal();i++){ulong t=OrderGetTicket(i);if(t&&OrderSelect(t)&&OrderGetString(ORDER_SYMBOL)==eaSymbol&&OrderGetInteger(ORDER_MAGIC)==InpMagicNumber)n++;}return n;
 }
 
-double CurrentRiskPct(ENUM_WINDOW_ID w,bool hv)
+//====================================================================
+// [CAPITAL ENGINE] adaptive profile + risk resolver + broker-native sizing
+// (prompt.md sections 4-12, 14, 16-18, 22-23). Auto mode = InpAutoCapitalProfile.
+// Legacy manual mode (InpAutoCapitalProfile=false) keeps the exact old behavior:
+// InpRiskPercent base, InpMax* fixed caps, InpLotSize when InpAutoRiskSizing=false.
+//====================================================================
+ENUM_CAPITAL_PROFILE g_capitalProfile=CAPITAL_MICRO;   // conservative until classified
+string  g_usdConvertNote="";          // CAPITAL_USD_CONVERSION_UNAVAILABLE / fallback telemetry
+string  g_fxConvSymbol="";            // cached conversion symbol (empty = USD account / unresolved)
+bool    g_fxConvInvert=false;         // true: symbol is USDBASE (rate must be inverted)
+double  g_fxConvRate=0;               // cached account-currency -> USD rate (0 = unresolved)
+datetime g_fxLastRefresh=0;
+string  g_lastRiskReason="";          // RiskSizingReason telemetry
+double  g_lastRawLots=0,g_lastFinalLots=0,g_lastAllowedRiskMoney=0,g_lastActualRiskMoney=0;
+double  g_lastRequiredMargin=0;int    g_lastOrderCheckRetcode=0;string g_lastOrderCheckComment="";
+int     g_minLotRejects=0,g_marginRejects=0,g_spreadRejects=0,g_slipRejects=0,g_orderCheckRejects=0;
+double  g_riskOverrideRequested=0;    // mobile RISK_x request (0 = none)
+
+//--- USD-equivalent equity for PROFILE CLASSIFICATION AND DISPLAY ONLY (section 5)
+double GetAccountCurrencyToUSD()
 {
-   double r=(InpSimpleScalpMode?0.35:InpRiskPercent);   // scalp base risk: bounded, small
-   double dd=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
-   if(dd>InpMaxFloatingDDPercent*0.5)r=MathMax(0.10,r-InpRiskStepDownOnDD);
-   // Consecutive-loss risk decay instead of a hard pause: each straight loss cuts the
-   // next trade's risk 30% (floor 0.10%). Trading continues; exposure self-corrects.
-   // Full pause only at the configured limit (breaker).
-   r*=MathPow(0.70,MathMin(4,g_consecutiveLosses));
-   if(r<0.10)r=0.10;
-   r*=WindowRiskMultiplier(w);if(hv)r*=InpHVExtraSignalRiskMult;return r;
+   string cur=AccountInfoString(ACCOUNT_CURRENCY);
+   if(cur=="USD"||cur==""){g_fxConvSymbol="";return 1.0;}
+   // Periodic refresh: no per-tick symbol scans. Cached symbol is reused.
+   datetime now=TimeCurrent();
+   bool needScan=(g_fxConvSymbol==""||g_fxConvRate<=0||now-g_fxLastRefresh>=900);
+   if(!needScan)return g_fxConvRate;
+   g_fxLastRefresh=now;
+   // Try cached symbol first, then discover BASEUSD / USDBASE (+ prefix/suffix variants).
+   string base=cur;
+   if(g_fxConvSymbol!="")
+   {
+      double px=SymbolInfoDouble(g_fxConvSymbol,SYMBOL_BID);
+      if(px>0){g_fxConvRate=(g_fxConvInvert?1.0/px:px);return g_fxConvRate;}
+      g_fxConvSymbol="";   // stale: rediscover
+   }
+   int total=SymbolsTotal(false);
+   string direct="";string inverse="";
+   for(int i=0;i<total;i++)
+   {
+      string s=SymbolName(i,false);
+      if(StringLen(s)<6)continue;
+      if(StringFind(s,base)!=0 && StringFind(s,base)==StringLen(s)-StringLen(base)-3 && StringSubstr(s,StringLen(s)-3)!=base){/*prefix variant handled below*/}
+      // BASEUSD: symbol starts with account currency and ends with USD
+      if(StringFind(s,base)==0 && StringSubstr(s,StringLen(s)-3)=="USD"){direct=s;break;}
+      // USDBASE: symbol starts with USD and ends with account currency
+      if(StringFind(s,"USD")==0 && StringSubstr(s,StringLen(s)-StringLen(base))==base && inverse=="")inverse=s;
+   }
+   string pick="";bool inv=false;
+   if(direct!=""){pick=direct;inv=false;}
+   else if(inverse!=""){pick=inverse;inv=true;}
+   if(pick!="")
+   {
+      if(SymbolSelect(pick,true))
+      {
+         double px=SymbolInfoDouble(pick,SYMBOL_BID);
+         if(px>0){g_fxConvSymbol=pick;g_fxConvInvert=inv;g_fxConvRate=(inv?1.0/px:px);g_usdConvertNote="";return g_fxConvRate;}
+      }
+   }
+   // NO invented rates: conservative profile fallback + telemetry (section 5).
+   g_fxConvSymbol="";g_fxConvRate=0;g_usdConvertNote="CAPITAL_USD_CONVERSION_UNAVAILABLE";
+   return 0;
 }
 
+double GetEquityUSD()
+{
+   double r=GetAccountCurrencyToUSD();
+   if(r<=0)return 0;
+   return AccountInfoDouble(ACCOUNT_EQUITY)*r;
+}
+
+//--- centralized profile access (section 4): no scattered tier ifs elsewhere
+ENUM_CAPITAL_PROFILE GetCapitalProfile()
+{
+   if(!InpAutoCapitalProfile)return CAPITAL_STANDARD;   // manual mode: neutral tier, legacy inputs rule
+   double usd=GetEquityUSD();
+   if(usd<=0)
+   {
+      if(g_usdConvertNote=="")g_usdConvertNote="CAPITAL_PROFILE_CONSERVATIVE_FALLBACK";
+      return CAPITAL_MICRO;    // unresolved conversion -> MOST CONSERVATIVE profile
+   }
+   if(usd<500.0)return CAPITAL_MICRO;
+   if(usd<5000.0)return CAPITAL_STANDARD;
+   return CAPITAL_PRO;
+}
+
+string CapitalProfileName(ENUM_CAPITAL_PROFILE p)
+{
+   switch(p)
+   {
+      case CAPITAL_MICRO:return "MICRO";
+      case CAPITAL_STANDARD:return "STANDARD";
+      case CAPITAL_PRO:return "PRO";
+   }
+   return "UNKNOWN";
+}
+
+//--- profile parameters (section 4 defaults; hard exception ceilings for min-lot)
+double GetProfileBaseRiskPct()
+{
+   if(!InpAutoCapitalProfile)return InpRiskPercent;
+   switch(GetCapitalProfile())
+   {
+      case CAPITAL_MICRO:return 0.25;
+      case CAPITAL_STANDARD:return 0.35;
+      case CAPITAL_PRO:return 0.35;
+   }
+   return 0.35;
+}
+double GetProfileAggregateRiskPct()
+{
+   if(!InpAutoCapitalProfile)return InpMaxAggregateOpenRiskPct;
+   switch(GetCapitalProfile())
+   {
+      case CAPITAL_MICRO:return 0.75;
+      case CAPITAL_STANDARD:return 1.50;
+      case CAPITAL_PRO:return 2.50;
+   }
+   return 1.50;
+}
+double GetProfileDirectionalRiskPct()
+{
+   if(!InpAutoCapitalProfile)return InpMaxDirectionalRiskPct;
+   switch(GetCapitalProfile())
+   {
+      case CAPITAL_MICRO:return 0.50;
+      case CAPITAL_STANDARD:return 1.00;
+      case CAPITAL_PRO:return 1.50;
+   }
+   return 1.00;
+}
+double GetProfileWindowRiskPct()
+{
+   if(!InpAutoCapitalProfile)return InpPerWindowRiskBudgetPct;
+   switch(GetCapitalProfile())
+   {
+      case CAPITAL_MICRO:return 0.50;
+      case CAPITAL_STANDARD:return 0.75;
+      case CAPITAL_PRO:return 1.50;
+   }
+   return 0.75;
+}
+double GetProfileMinLotRiskCeilingPct()
+{
+   if(!InpAutoCapitalProfile)return InpMinLotMaxRiskPct;
+   switch(GetCapitalProfile())
+   {
+      case CAPITAL_MICRO:return 1.00;
+      case CAPITAL_STANDARD:return 0.75;
+      case CAPITAL_PRO:return 0.50;
+   }
+   return 0.75;
+}
+int GetProfileMaxPositions()
+{
+   if(!InpAutoCapitalProfile)return InpMaxConcurrentPositions;
+   switch(GetCapitalProfile())
+   {
+      case CAPITAL_MICRO:return 1;
+      case CAPITAL_STANDARD:return 2;
+      case CAPITAL_PRO:return 3;
+   }
+   return 2;
+}
+
+//--- section 6: new trades size from min(balance,equity) - never from floating profit
+double GetConservativeCapitalBase()
+{
+   double bal=AccountInfoDouble(ACCOUNT_BALANCE),eq=AccountInfoDouble(ACCOUNT_EQUITY);
+   return MathMin(bal,eq);
+}
+
+//--- section 9: mobile RISK_x is a REQUEST; clamped to every live ceiling here.
+//--- Returns the permitted risk % (Auto mode); manual mode returns the raw request
+//--- clamped by the legacy base risk path as before.
+double GetMobileRiskRequestPct()
+{
+   if(!InpEnableMobileCommands)return 0;
+   if(!GlobalVariableCheck("PAT_RISK_OVERRIDE"))return 0;
+   double v=GlobalVariableGet("PAT_RISK_OVERRIDE");
+   if(v<=0)return 0;
+   return v;   // caller clamps; GV persists until RISK_0 clears it
+}
+
+double GetEffectiveTradeRiskPct(ENUM_WINDOW_ID window,bool highVolatility)
+{
+   // Order (section 7): profile base -> mobile request (clamped) -> DD reduction ->
+   // consecutive-loss reduction -> window multiplier -> HV multiplier -> ceiling.
+   bool auto=(InpAutoCapitalProfile&&InpAutoRiskSizing);
+   double base=(auto?GetProfileBaseRiskPct():InpRiskPercent);
+   double r=base;
+   // Mobile request: a REQUEST, never a bypass. Accepted only if at or below every
+   // applicable ceiling; otherwise clamped with RISK_OVERRIDE_CLAMPED telemetry.
+   double req=GetMobileRiskRequestPct();
+   if(req>0)
+   {
+      double cap=base;
+      double dd=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
+      if(dd>InpMaxFloatingDDPercent*0.5)cap=MathMin(cap,base-InpRiskStepDownOnDD);
+      cap=MathMin(cap,base*MathPow(0.70,MathMin(4,g_consecutiveLosses)));
+      cap*=WindowRiskMultiplier(window);
+      if(highVolatility)cap*=InpHVExtraSignalRiskMult;
+      if(cap>0&&req>cap)
+      {
+         if(req!=g_riskOverrideRequested)Print("RISK_OVERRIDE_CLAMPED requested=",DoubleToString(req,3)," accepted=",DoubleToString(cap,3));
+      }
+      if(cap>0)r=MathMin(r,cap);   // never above the modified base regardless
+   }
+   // Drawdown reduction (existing behavior, now profile-relative).
+   double dd2=(g_dayAnchor>0?(g_dayAnchor-AccountInfoDouble(ACCOUNT_EQUITY))/g_dayAnchor*100:0);
+   if(dd2>InpMaxFloatingDDPercent*0.5)r=MathMax(0.0,r-InpRiskStepDownOnDD);
+   // Consecutive-loss decay 30%/loss (existing behavior, no hard halt).
+   r*=MathPow(0.70,MathMin(4,g_consecutiveLosses));
+   // Window performance multiplier (R-based in Auto mode, money in legacy).
+   r*=WindowRiskMultiplier(window);
+   // HV multiplier (existing behavior).
+   if(highVolatility)r*=InpHVExtraSignalRiskMult;
+   // Floor: bounded by the profile safe base - modifiers can never be UNDONE
+   // (a floor may not exceed the current modified risk; it only stops decay-to-zero).
+   double floor=MathMin(InpRiskFloorPct,(auto?GetProfileBaseRiskPct():InpRiskPercent));
+   if(r<floor&&r>0)r=floor;
+   // Profile hard ceiling: final effective risk may never exceed the profile base.
+   double ceiling=(auto?GetProfileBaseRiskPct():InpRiskPercent);
+   if(r>ceiling)r=ceiling;
+   if(r<=0)return 0;
+   return r;
+}
+
+
+
+//--- section 16: ONE authoritative risk method = broker SL loss + all-in costs.
+//--- Components (single basis, no double counting):
+//---   OrderCalcProfit(entry -> SL)  : price risk INCLUDING the spread the position
+//---     actually loses through (buy closes at bid / sell at ask).
+//---   ExpectedAllInCost(lots)       : remaining execution costs NOT in the SL P/L:
+//---     round-trip commission + expected entry slippage. Spread is NOT added again.
+double CalculateRealTradeRiskMoney(int direction,double volume,double entry,double stopLoss)
+{
+   if(volume<=0||entry<=0||stopLoss<=0)return 0;
+   double riskMoney=0;
+   if(CalcBrokerPnL(direction,volume,entry,stopLoss,riskMoney))
+   {
+      riskMoney=MathAbs(riskMoney);
+   }
+   else
+   {
+      // Fallback: existing tick-size/tick-value architecture. Prefer the LOSS-side
+      // tick value when the broker publishes it (section 13/14) and log the fallback.
+      double tv=broker.tickValueLoss;
+      if(tv<=0)tv=broker.tickValue;
+      if(broker.tickSize>0&&tv>0)
+      {
+         riskMoney=MathAbs(entry-stopLoss)/broker.tickSize*tv*volume;
+         if(g_lastRiskReason!="")g_lastRiskReason=g_lastRiskReason+"|OCF_FALLBACK";
+         else g_lastRiskReason="OCF_FALLBACK";
+      }
+      else return 0;   // cannot estimate: caller BLOCKS (never assume zero risk)
+   }
+   return riskMoney+ExpectedAllInCost(volume);
+}
+
+//--- section 31: directional volume limit (open + pending, same direction)
+double SumOwnLotsDirectional(int dir)
+{
+   double s=0;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong t=PositionGetTicket(i);if(!t||!PositionSelectByTicket(t))continue;
+      if(PositionGetString(POSITION_SYMBOL)!=eaSymbol||PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber)continue;
+      int d=(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY?1:-1);
+      if(d==dir)s+=PositionGetDouble(POSITION_VOLUME);
+   }
+   for(int i=0;i<OrdersTotal();i++)
+   {
+      ulong t=OrderGetTicket(i);if(!t||!OrderSelect(t))continue;
+      if(OrderGetString(ORDER_SYMBOL)!=eaSymbol||OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber)continue;
+      ENUM_ORDER_TYPE ot=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      int d=((ot==ORDER_TYPE_BUY||ot==ORDER_TYPE_BUY_STOP||ot==ORDER_TYPE_BUY_LIMIT)?1:-1);
+      if(d==dir)s+=OrderGetDouble(ORDER_VOLUME_CURRENT);
+   }
+   return s;
+}
+
+//--- section 32: low-cost periodic refresh of mutable broker volume specs
+datetime g_volSpecLastCheck=0;
+void RefreshVolumeSpecs()
+{
+   datetime now=ServerNow();
+   if(g_volSpecLastCheck>0&&now-g_volSpecLastCheck<300)return;   // 5-min refresh, not per tick
+   g_volSpecLastCheck=now;
+   broker.volumeMin=SymbolInfoDouble(eaSymbol,SYMBOL_VOLUME_MIN);
+   broker.volumeMax=SymbolInfoDouble(eaSymbol,SYMBOL_VOLUME_MAX);
+   broker.volumeStep=SymbolInfoDouble(eaSymbol,SYMBOL_VOLUME_STEP);
+   broker.volumeLimit=SymbolInfoDouble(eaSymbol,SYMBOL_VOLUME_LIMIT);
+   broker.stopsLevel=(int)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_STOPS_LEVEL);
+   broker.freezeLevel=(int)SymbolInfoInteger(eaSymbol,SYMBOL_TRADE_FREEZE_LEVEL);
+}
+
+//--- section 17: authoritative broker-native lot solver.
+//--- direction: +1 buy / -1 sell. entry: planned entry. sl: planned SL (price).
+//--- Returns approved volume (0 = BLOCK THE TRADE; g_lastRiskReason carries the gate).
+double CalculateLotNative(double slDist,int dir,double entry,double sl,ENUM_WINDOW_ID w,bool hv)
+{
+   g_lastRiskReason="";g_lastRawLots=0;g_lastFinalLots=0;g_lastAllowedRiskMoney=0;g_lastActualRiskMoney=0;g_lastRequiredMargin=0;
+   if(slDist<=0||entry<=0||sl<=0){g_lastRiskReason="INVALID_SL";return 0;}
+   RefreshVolumeSpecs();
+   ENUM_CAPITAL_PROFILE prof=GetCapitalProfile();
+   // Legacy manual path: InpAutoRiskSizing=false -> old fixed-lot behavior exactly.
+   if(!InpAutoRiskSizing)
+   {
+      if(InpRiskPercent<=0)return NormalizeVolume(InpLotSize);
+      // manual risk % sizing on the conservative base (old math kept, new base)
+      double cap=GetConservativeCapitalBase();
+      double risk=cap*InpRiskPercent/100.0;
+      double perLot=PriceMoveMoney(slDist,1.0)+ExpectedAllInCost(1.0);
+      if(perLot<=0)return 0;
+      return FloorVolume(risk/perLot);
+   }
+   // -------- AUTO MODE: the full section-17 pipeline --------
+   double rp=GetEffectiveTradeRiskPct(w,hv);
+   if(rp<=0){g_lastRiskReason="RISK_RESOLVER_ZERO";return 0;}
+   double capitalBase=GetConservativeCapitalBase();
+   if(capitalBase<=0){g_lastRiskReason="CAPITAL_TOO_SMALL";return 0;}
+   double allowedRisk=capitalBase*rp/100.0;
+   g_lastAllowedRiskMoney=allowedRisk;
+   // No-martingale / no-averaging-down: ANY underwater position of ours caps the new
+   // trade at the current base risk money (never larger). Section 10 + 36.
+   double baseCapMoney=capitalBase*GetProfileBaseRiskPct()/100.0;
+   if((InpNoMartingale||InpNoAveragingDown)&&CountOwnPositions()>0)
+   {
+      for(int i=0;i<PositionsTotal();i++)
+      {
+         ulong t=PositionGetTicket(i);if(!t||!PositionSelectByTicket(t))continue;
+         if(PositionGetString(POSITION_SYMBOL)!=eaSymbol||PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber)continue;
+         double op=PositionGetDouble(POSITION_PRICE_OPEN);
+         int pd=(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY?1:-1);
+         double px=(pd>0?Bid():Ask());
+         if((pd>0&&px<op)||(pd<0&&px>op)){if(allowedRisk>baseCapMoney)allowedRisk=baseCapMoney;g_lastRiskReason="UNDERWATER_CAP";break;}
+      }
+   }
+   // Risk per 1.0 lot via the authoritative money engine (broker SL loss + costs).
+   double perLot=CalculateRealTradeRiskMoney(dir,1.0,entry,sl);
+   if(perLot<=0){g_lastRiskReason="RISK_PER_LOT_ZERO";return 0;}
+   double raw=allowedRisk/perLot;
+   g_lastRawLots=raw;
+   // Normalize DOWN to the broker grid; never round risk upward.
+   double vol=FloorVolume(raw);
+   // Minimum-lot feasibility (section 18): hard profile exception ceiling.
+   if(vol<=0)
+   {
+      if(!InpAllowMinLotFallback){g_lastRiskReason="BELOW_VOLUME_MIN";return 0;}
+      double minVol=broker.volumeMin;
+      double minRisk=CalculateRealTradeRiskMoney(dir,minVol,entry,sl);
+      double minPct=(capitalBase>0?minRisk/capitalBase*100.0:999);
+      double ceiling=GetProfileMinLotRiskCeilingPct();
+      if(minPct<=ceiling&&minRisk>0)vol=FloorVolume(minVol);
+      else
+      {
+         g_minLotRejects++;
+         g_lastRiskReason="MIN_LOT_RISK_TOO_HIGH";
+         Print("MIN_LOT_RISK_TOO_HIGH profile=",CapitalProfileName(prof)," balance=",DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2)," equity=",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)," capitalBase=",DoubleToString(capitalBase,2)," equityUSD=",DoubleToString(GetEquityUSD(),2)," symbol=",eaSymbol," contractSize=",DoubleToString(broker.contractSize,0)," tickSize=",DoubleToString(broker.tickSize,broker.digits)," tickValue=",DoubleToString(broker.tickValue,4)," volumeMin=",DoubleToString(broker.volumeMin,3)," volumeStep=",DoubleToString(broker.volumeStep,3)," slDist=",DoubleToString(slDist,broker.digits)," minLotRiskMoney=",DoubleToString(minRisk,2)," minLotRiskPct=",DoubleToString(minPct,3)," ceiling=",DoubleToString(ceiling,2));
+         return 0;   // never weaken limits to force execution
+      }
+   }
+   // Iterative safety descent: volume risk -> aggregate -> directional -> window ->
+   // margin -> OrderCheck. Each violation drops ONE volume step (bounded loops,
+   // never increases volume during a safety correction).
+   double step=(broker.volumeStep>0?broker.volumeStep:0.01);
+   int guard=0;
+   double eq=AccountInfoDouble(ACCOUNT_EQUITY);
+   double freeBefore=AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   while(vol>=broker.volumeMin-1e-9&&guard++<200)
+   {
+      bool changed=false;
+      // (a) actual risk at normalized volume
+      double actualRisk=CalculateRealTradeRiskMoney(dir,vol,entry,sl);
+      if(actualRisk>allowedRisk+1e-9){vol=FloorVolume(vol-step);changed=true;if(vol<=0)break;continue;}
+      g_lastActualRiskMoney=actualRisk;
+      // (b) aggregate + directional + window caps (profile limits in Auto mode)
+      double newRisk=actualRisk;
+      double aggPct=(eq>0?(OpenRiskMoney()+newRisk)/eq*100.0:999);
+      double dirPct=(eq>0?(OpenRiskMoney(dir)+newRisk)/eq*100.0:999);
+      if(aggPct>GetProfileAggregateRiskPct()){g_lastRiskReason="AGGREGATE_RISK_CAP";break;}
+      if(dirPct>GetProfileDirectionalRiskPct()){g_lastRiskReason="DIRECTIONAL_RISK_CAP";break;}
+      if(g_windowRiskUsed[w]+newRisk>eq*GetProfileWindowRiskPct()/100.0){g_lastRiskReason="WINDOW_RISK_CAP";break;}
+      // (c) legacy/emergency absolute lot cap: only when explicitly enabled
+      if(InpUseAbsoluteLotEmergencyCap&&InpEmergencyMaxTotalLots>0)
+      {
+         double room=InpEmergencyMaxTotalLots-SumOwnLots();
+         if(vol>room){vol=FloorVolume(room);changed=true;if(vol<=0)break;continue;}
+      }
+      // (d) broker directional volume limit (section 31)
+      if(broker.volumeLimit>0)
+      {
+         double room=broker.volumeLimit-SumOwnLotsDirectional(dir);
+         if(vol>room+1e-9){g_lastRiskReason="SYMBOL_VOLUME_LIMIT";vol=FloorVolume(MathMin(vol,room));changed=true;if(vol<=0)break;continue;}
+      }
+      // (e) margin via OrderCalcMargin (section 22): native, account currency.
+      double reqMargin=0;
+      ENUM_ORDER_TYPE ot=(dir>0?ORDER_TYPE_BUY:ORDER_TYPE_SELL);
+      if(!OrderCalcMargin(ot,eaSymbol,vol,entry,reqMargin))
+      {
+         // Fallback: reject rather than guess margin with an invented formula.
+         g_lastRiskReason="MARGIN_CALC_FAILED";break;
+      }
+      g_lastRequiredMargin=reqMargin;
+      if(eq>0&&reqMargin/eq*100.0>InpMaxNewTradeMarginPct)
+      {
+         double byStep=FloorVolume(vol-step);
+         if(byStep<broker.volumeMin){g_marginRejects++;g_lastRiskReason="MARGIN_CAP";break;}
+         vol=byStep;changed=true;continue;
+      }
+      double projectedFree=freeBefore-reqMargin;
+      if(eq>0&&projectedFree<eq*InpMinFreeMarginReservePct/100.0)
+      {
+         double byStep2=FloorVolume(vol-step);
+         if(byStep2<broker.volumeMin){g_marginRejects++;g_lastRiskReason="MARGIN_INSUFFICIENT";break;}
+         vol=byStep2;changed=true;continue;
+      }
+      // (f) OrderCheck on the real request shape (section 23).
+      MqlTradeRequest rq;MqlTradeCheckResult chk;ZeroMemory(rq);ZeroMemory(chk);
+      rq.action=TRADE_ACTION_DEAL;rq.symbol=eaSymbol;rq.magic=InpMagicNumber;rq.volume=vol;
+      rq.type=ot;rq.price=entry;rq.sl=sl;rq.deviation=AdaptiveDeviationPoints();
+      if(!OrderCheck(rq,chk))
+      {
+         g_orderCheckRejects++;g_lastOrderCheckRetcode=(int)chk.retcode;g_lastOrderCheckComment=chk.comment;
+         // Volume-related failures shrink a step; structural failures (stops/price)
+         // are retried identically by OrderSend anyway -> fail here and log.
+         if(chk.retcode==TRADE_RETCODE_NO_MONEY)
+         {
+            double byStep3=FloorVolume(vol-step);
+            if(byStep3<broker.volumeMin){g_lastRiskReason="ORDER_CHECK_FAILED";break;}
+            vol=byStep3;changed=true;continue;
+         }
+         g_lastRiskReason="ORDER_CHECK_FAILED";
+         break;
+      }
+      g_lastOrderCheckRetcode=0;g_lastOrderCheckComment="";
+      if(!changed)break;   // all checks passed at this volume
+   }
+   if(vol<broker.volumeMin-1e-9)return 0;
+   g_lastFinalLots=vol;
+   return vol;
+}
+
+//--- section 23: dedicated preflight for NEW trade requests only. Never called for
+//--- SL/TP modifications or deletions (those keep their own paths).
+bool PreflightNewTrade(MqlTradeRequest &request,MqlTradeCheckResult &check,string &reason)
+{
+   reason="";
+   MqlTradeCheckResult chk;ZeroMemory(chk);
+   if(!OrderCheck(request,chk))
+   {
+      check=chk;g_orderCheckRejects++;
+      g_lastOrderCheckRetcode=(int)chk.retcode;g_lastOrderCheckComment=chk.comment;
+      reason="ORDER_CHECK_FAILED:"+chk.comment;
+      Print("ORDER_CHECK_FAILED retcode=",chk.retcode," comment=",chk.comment," balance=",DoubleToString(chk.balance,2)," equity=",DoubleToString(chk.equity,2)," margin=",DoubleToString(chk.margin,2)," free=",DoubleToString(chk.margin_free,2)," level=",DoubleToString(chk.margin_level,2));
+      return false;
+   }
+   check=chk;g_lastOrderCheckRetcode=0;g_lastOrderCheckComment="";
+   return true;
+}
+
+//--- section 27: adaptive slippage deviation for NEW ENTRY requests.
+//--- Emergency closes keep their own explicit deviation (never restricted by this).
+int AdaptiveDeviationPoints()
+{
+   int extreme=(int)InpExtremeSlippagePoints;
+   if(g_slipCnt<5)return (int)MathMin(InpMaxSlippagePoints,extreme);   // warmup -> legacy fallback
+   // Mature data: learned execution profile, bounded by the legacy ceiling and the
+   // pathological cap. Respect point scale for 3-digit feeds.
+   double avg=g_slipAvg;   // measured in points already (PushSlippage)
+   int dev=(int)MathMax(3.0,MathMin((double)InpMaxSlippagePoints,MathMin(extreme-1,MathMax(avg*2.0,InpMaxSlippagePoints*0.4))));
+   return dev;
+}
+
+//--- section 44: non-trading self-tests. Profile classification boundaries and risk
+//--- monotonicity on synthetic broker specs. NO real orders are sent by this function.
+double g_usdTestHelper=0;
+ENUM_CAPITAL_PROFILE CapClassifyTest()
+{
+   // Local mirror of the boundary logic in GetCapitalProfile (that function reads live
+   // account state; the test verifies the BOUNDARY TABLE itself).
+   if(g_usdTestHelper<500.0)return CAPITAL_MICRO;
+   if(g_usdTestHelper<5000.0)return CAPITAL_STANDARD;
+   return CAPITAL_PRO;
+}
+void CapitalSelfTest()
+{
+   bool allOK=true;
+   // --- profile boundary table (section 44) ---
+   double  tUsd[11]={49.99,50.0,100.0,499.99,500.0,1000.0,4999.99,5000.0,10000.0,50000.0,100000.0};
+   int     tExp[11]={0,0,0,0,1,1,1,2,2,2,2};   // 0=MICRO 1=STANDARD 2=PRO
+   for(int i=0;i<11;i++)
+   {
+      g_usdTestHelper=tUsd[i];
+      ENUM_CAPITAL_PROFILE got=CapClassifyTest();
+      if((int)got!=tExp[i])
+      {
+         allOK=false;
+         Print("CAPITAL SELF-TEST FAIL: equityUSD=",DoubleToString(tUsd[i],2)," expected=",tExp[i]," got=",CapitalProfileName(got));
+      }
+   }
+   // --- risk monotonicity on the volume solver (synthetic specs, no orders) ---
+   {
+      double saveMin=broker.volumeMin,saveMax=broker.volumeMax,saveStep=broker.volumeStep,saveTick=broker.tickSize,saveTickV=broker.tickValue;
+      broker.volumeMin=0.01;broker.volumeMax=100;broker.volumeStep=0.01;broker.tickSize=0.01;broker.tickValue=1.0;
+      double e=2000.0,sl1=e-4.0,sl2=e-8.0;   // larger SL = larger distance
+      double r1=CalculateRealTradeRiskMoney(1,1.0,e,sl1);
+      double r2=CalculateRealTradeRiskMoney(1,1.0,e,sl2);
+      if(!(r2>r1)){allOK=false;Print("CAPITAL SELF-TEST FAIL: larger SL must produce larger risk money (",DoubleToString(r2,2)," vs ",DoubleToString(r1,2),")");}
+      broker.tickValue=200.0;   // XAUUSD-like: $1 move = $100/lot
+      double r3=CalculateRealTradeRiskMoney(1,1.0,e,sl1);
+      if(!(r3>r1)){allOK=false;Print("CAPITAL SELF-TEST FAIL: higher tick value must produce larger risk money");}
+      broker.volumeMin=saveMin;broker.volumeMax=saveMax;broker.volumeStep=saveStep;broker.tickSize=saveTick;broker.tickValue=saveTickV;
+   }
+   if(allOK)Print("CAPITAL SELF-TEST PASS: profile boundaries + risk monotonicity (no orders sent)");
+   else      Print("CAPITAL SELF-TEST FAIL: see lines above - DO NOT deploy");
+}
+
+double CurrentRiskPct(ENUM_WINDOW_ID w,bool hv)
+{
+   // Legacy-compatible wrapper: existing callers get the new resolver transparently.
+   return GetEffectiveTradeRiskPct(w,hv);
+}
+
+//--- section 17 driver: signature kept, body delegates to the native solver.
+//--- (dir/entry from the current spread: market entries at Ask/Bid; pending at price.)
 double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv)
 {
-   if(InpRiskPercent<=0)return NormalizeVolume(InpLotSize);if(slDist<=0)return 0;double bal=AccountInfoDouble(ACCOUNT_BALANCE),rp=CurrentRiskPct(w,hv);if(rp<=0)return 0;
+   if(InpAutoRiskSizing&&InpAutoCapitalProfile)
+   {
+      // direction comes from the live scalp signal; solver itself is direction-symmetric
+      // for the gold quote (OrderCalcProfit BUY/SELL differ only by the entry/exit side,
+      // which is captured by entry+SL prices).
+      int dir=(g_scalpSignal>0?1:(g_scalpSignal<0?-1:0));
+      if(dir==0)dir=1;
+      double entry=(dir>0?Ask():Bid());
+      double sl=(dir>0?entry-slDist:entry+slDist);
+      return CalculateLotNative(slDist,dir,entry,PriceNorm(sl),w,hv);
+   }
+   // Legacy manual pipeline (InpAutoRiskSizing=false ONLY): unchanged behavior,
+   // conservative base swapped in. InpLotSize applies here exactly as before.
+   if(InpRiskPercent<=0)return NormalizeVolume(InpLotSize);if(slDist<=0)return 0;double bal=GetConservativeCapitalBase(),rp=CurrentRiskPct(w,hv);if(rp<=0)return 0;
    double risk=bal*rp/100.0;
-   // No-martingale / no-averaging-down enforcement: while ANY position of ours is
-   // underwater, new entries never size up (risk stays at or below the base step).
    if((InpNoMartingale||InpNoAveragingDown)&&CountOwnPositions()>0)
    {
       for(int i=0;i<PositionsTotal();i++)
@@ -2876,15 +3549,9 @@ double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv)
          if((pd>0&&px<op)||(pd<0&&px>op)){risk=MathMin(risk,bal*InpRiskPercent/100.0);break;}
       }
    }
-   // Single cost basis: spread + expected slippage + commission (same as
-   // ExpectedAllInCost / NetProfitValid), so sizing neither under-counts costs
-   // nor double-counts them at risk accounting.
    double perLot=PriceMoveMoney(slDist,1.0)+ExpectedAllInCost(1.0);if(perLot<=0)return 0;double lots=risk/perLot;
-   if(InpMaxTotalLots>0)lots=MathMin(lots,MathMax(0,InpMaxTotalLots-SumOwnLots()));
+   if(InpMaxTotalLots>0&&InpUseAbsoluteLotEmergencyCap)lots=MathMin(lots,MathMax(0,InpMaxTotalLots-SumOwnLots()));
    double fv=FloorVolume(lots);
-   // Risk-% sizing below the broker minimum would floor to zero and block EVERY trade on
-   // small accounts. Fall back to one minimum lot when its real risk stays inside the hard
-   // cap (default 2% of balance) - the only viable way to scalp gold on a sub-$1k account.
    if(fv<=0 && InpAllowMinLotFallback && lots>0)
    {
       double minRisk=PriceMoveMoney(slDist,broker.volumeMin)+ExpectedAllInCost(broker.volumeMin);
@@ -2896,9 +3563,10 @@ double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv)
 bool RiskRoom(double newRisk,int dir,ENUM_WINDOW_ID w,string &why)
 {
    double eq=AccountInfoDouble(ACCOUNT_EQUITY);if(eq<=0){why="bad equity";return false;}
-   if((OpenRiskMoney()+newRisk)/eq*100.0>InpMaxAggregateOpenRiskPct){why="aggregate risk cap";return false;}
-   if((OpenRiskMoney(dir)+newRisk)/eq*100.0>InpMaxDirectionalRiskPct){why="direction risk cap";return false;}
-   if(g_windowRiskUsed[w]+newRisk>eq*InpPerWindowRiskBudgetPct/100.0){why="window risk budget";return false;}
+   // [CAPITAL ENGINE] profile limits in Auto mode; identical legacy inputs when false.
+   if((OpenRiskMoney()+newRisk)/eq*100.0>GetProfileAggregateRiskPct()){why="aggregate risk cap";return false;}
+   if((OpenRiskMoney(dir)+newRisk)/eq*100.0>GetProfileDirectionalRiskPct()){why="direction risk cap";return false;}
+   if(g_windowRiskUsed[w]+newRisk>eq*GetProfileWindowRiskPct()/100.0){why="window risk budget";return false;}
    return true;
 }
 
@@ -2975,13 +3643,37 @@ double RegimeTPMultiplier(ENUM_WINDOW_ID w,bool hv)
    if(hv)return 1.05;return 1.0;
 }
 
+//--- section 24: risk-relative TP viability gate. leg 1/2/3 -> % of INITIAL TRADE
+//--- RISK MONEY. Legacy fixed-money gates retained when the new gate is disabled.
+double MinNetProfitForLeg(int leg,double initialRiskMoney)
+{
+   if(!InpUseRiskRelativeNetProfitGate)
+   {
+      switch(leg)
+      {
+         case 1:return InpMinNetProfitTP1Money;
+         case 2:return InpMinNetProfitTP2Money;
+         case 3:return InpMinNetProfitTP3Money;
+      }
+      return InpMinNetProfitTP1Money;
+   }
+   double r=(initialRiskMoney>0?initialRiskMoney:0);
+   switch(leg)
+   {
+      case 1:return r*InpMinTP1NetRiskPct/100.0;
+      case 2:return r*InpMinTP2NetRiskPct/100.0;
+      case 3:return r*InpMinTP3NetRiskPct/100.0;
+   }
+   return r*InpMinTP1NetRiskPct/100.0;
+}
+
 bool NetProfitValid(int dir,double entry,double target,double lots,double minMoney,double &net)
 {
    double gross=PriceMoveMoney(target-entry,lots);double cost=ExpectedAllInCost(lots);net=gross-cost;
    if(gross<=0)return false;if(cost/gross*100.0>InpMaxCostToTP1Pct)return false;return net>=minMoney;
 }
 
-void BuildThreeTargets(int dir,double entry,double lots,ENUM_WINDOW_ID w,bool hv,double &tp1,double &tp2,double &tp3)
+void BuildThreeTargets(int dir,double entry,double sl,double lots,ENUM_WINDOW_ID w,bool hv,double &tp1,double &tp2,double &tp3)
 {
    double atr=MathMax(g_atr,MinTradeDistance()),k=RegimeTPMultiplier(w,hv);
    double d1=MathMax(InpTP1_ATR_Floor*atr,MathMin(InpTP1_ATR_Cap*atr,0.55*atr))*k;
@@ -3018,11 +3710,16 @@ void BuildThreeTargets(int dir,double entry,double lots,ENUM_WINDOW_ID w,bool hv
    if(v2<broker.volumeMin)v2=(v3<broker.volumeMin?0:lots-v1);
    if(v3<broker.volumeMin)v3=0;
    double net=0;int guard=0;
-   while(!NetProfitValid(dir,entry,tp1,v1,InpMinNetProfitTP1Money,net)&&guard++<10)tp1+=dir*0.10*atr;
+   // [TP GATES] risk-relative minimum net profit = % of this trade's INITIAL RISK
+   // (initialRiskMoney = SL loss + all-in cost at the actual volume; section 24).
+   double initialRisk=CalculateRealTradeRiskMoney(dir,lots,entry,sl);   // authoritative: SL loss + all-in cost (section 16/24)
+   if(initialRisk<=0)initialRisk=PriceMoveMoney(MathAbs(entry-sl),lots)+ExpectedAllInCost(lots);   // fallback parity
+   double min1=MinNetProfitForLeg(1,initialRisk),min2=MinNetProfitForLeg(2,initialRisk),min3=MinNetProfitForLeg(3,initialRisk);
+   while(!NetProfitValid(dir,entry,tp1,v1,min1,net)&&guard++<10)tp1+=dir*0.10*atr;
    guard=0;
-   while(v2>0&&!NetProfitValid(dir,entry,tp2,v2,InpMinNetProfitTP2Money,net)&&guard++<10)tp2+=dir*0.10*atr;
+   while(v2>0&&!NetProfitValid(dir,entry,tp2,v2,min2,net)&&guard++<10)tp2+=dir*0.10*atr;
    guard=0;
-   while(v3>0&&!NetProfitValid(dir,entry,tp3,v3,InpMinNetProfitTP3Money,net)&&guard++<10)tp3+=dir*0.10*atr;
+   while(v3>0&&!NetProfitValid(dir,entry,tp3,v3,min3,net)&&guard++<10)tp3+=dir*0.10*atr;
    if(dir>0){tp2=MathMax(tp2,tp1+md);tp3=MathMax(tp3,tp2+md);}else{tp2=MathMin(tp2,tp1-md);tp3=MathMin(tp3,tp2-md);}
    tp1=PriceNorm(tp1);tp2=PriceNorm(tp2);tp3=PriceNorm(tp3);
 }
@@ -3088,6 +3785,9 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    double sp=SpreadPoints();
    if(sp>InpMaxSpreadPoints*g_ptScale){why="spread hard cap";return false;}
    if(sp>=(InpMaxSpreadPoints+20)*g_ptScale){why="spread extreme";return false;}   // > hard cap+20 = broken feed
+   // [SPREAD] adaptive relative gate after warmup (section 26): ATR-ratio + percentile
+   // + spike conditions; emergency closes never pass through here.
+   if(!AdaptiveSpreadOK(g_atr,why))return false;
    double atrPts=(broker.point>0?g_atr/broker.point:0);
    if(atrPts<InpMinATRPoints*g_ptScale){why="ATR chop";return false;}
    // ============ ULTRA-SCALP SIMPLE PATH (default) ============
@@ -3126,7 +3826,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
       hv=false;
       if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}
       if(!broker.hedging&&CountOwnPositions()>0){why="netting: one position";return false;}
-      if(CountOwnPositions()>=InpMaxConcurrentPositions){why="position cap";return false;}
+      if(CountOwnPositions()>=GetProfileMaxPositions()){why="position cap";return false;}
       return true;
    }
    RefreshWindowGating(w);if(g_ws[w].disabled){why="window expectancy disabled";return false;}
@@ -3150,7 +3850,7 @@ bool CanEnter(int dir,ENUM_WINDOW_ID &w,bool &hv,string &setup,string &why)
    bool preferred=(w==WIN_SYDNEY_TOKYO||w==WIN_TOKYO_LONDON||w==WIN_LONDON_OPEN||w==WIN_LONDON_NY||w==WIN_NY_OPEN||w==WIN_VERIFIED_EXPANSION);
    if(InpHighVolatilityMode==HV_FORCE_GATED && preferred && !hv){why="HV verification failed";return false;}
    if(!FreshSetup(dir,w,setup,why))return false;
-   if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}if(!broker.hedging&&CountOwnPositions()>0){why="netting account: one strategy position at a time";return false;}if(CountOwnPositions()>=InpMaxConcurrentPositions){why="position cap";return false;}
+   if(g_tradesToday>=InpMaxTradesPerDay){why="daily trade cap";return false;}if(!broker.hedging&&CountOwnPositions()>0){why="netting account: one strategy position at a time";return false;}if(CountOwnPositions()>=GetProfileMaxPositions()){why="position cap";return false;}
    return true;
 }
 
@@ -3193,6 +3893,10 @@ bool PlaceStop(int dir,double lots,double price,double sl,double tp,string comme
    rq.action=TRADE_ACTION_PENDING;rq.symbol=eaSymbol;rq.magic=InpMagicNumber;rq.volume=lots;
    rq.type=(dir>0?ORDER_TYPE_BUY_STOP:ORDER_TYPE_SELL_STOP);
    rq.price=price;rq.sl=sl;rq.tp=tp;rq.comment=comment;
+   // [PREFLIGHT] new pending entries also go through OrderCheck (section 23).
+   MqlTradeCheckResult pchk;string pr="";
+   MqlTradeRequest probe=rq;probe.type_time=ORDER_TIME_GTC;probe.expiration=0;   // OrderCheck: GTC shape validates the same economics
+   if(!PreflightNewTrade(probe,pchk,pr))return false;
    datetime exp=ServerNow()+InpPendingExpiryMinutes*60;
    // Most brokers accept ORDER_TIME_SPECIFIED; the final attempt falls back to
    // GTC (stale pendings are still swept by InpCancelStalePendings).
@@ -3213,7 +3917,13 @@ bool MarketOrder(int dir,double lots,double sl,double tp,string comment,double &
    rq.action=TRADE_ACTION_DEAL;rq.symbol=eaSymbol;rq.magic=InpMagicNumber;rq.volume=lots;
    rq.type=(dir>0?ORDER_TYPE_BUY:ORDER_TYPE_SELL);
    rq.price=(dir>0?Ask():Bid());
-   rq.deviation=InpMaxSlippagePoints;rq.comment=comment;rq.sl=sl;rq.tp=tp;
+   // [SLIPPAGE] adaptive entry deviation from learned execution profile (section 27);
+   // bounded by the legacy ceiling and the pathological cap. Closes keep their own
+   // explicit deviation (ClosePartialSafe) so emergency exits are never restricted.
+   rq.deviation=AdaptiveDeviationPoints();rq.comment=comment;rq.sl=sl;rq.tp=tp;
+   // [PREFLIGHT] OrderCheck before dispatch of every NEW trade (section 23).
+   MqlTradeCheckResult chk;string pr="";
+   if(!PreflightNewTrade(rq,chk,pr))return false;
    if(!SendOrder(rq,rs))return false;
    // res.price is the real fill (B5 fix); fall back to the position price.
    fillPrice=(rs.price>0?rs.price:rq.price);
@@ -3318,7 +4028,7 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
    }
    if(InpSimpleScalpMode)g_armValid=false;    // stale snapshot (restart gap): fall back to complex ladder
    // Use the HV regime carried by the pending order so the executed plan matches the armed plan.
-   BuildThreeTargets(dir,entry,lots,w,hv,s.tp1,s.tp2,s.tp3);
+   BuildThreeTargets(dir,entry,sl,lots,w,hv,s.tp1,s.tp2,s.tp3);
    if(InpUseThreeTargets&&InpAB_EnableThreeTP)AllocateVolumes(lots,s.volTP1,s.volTP2,s.volTP3);
    else{s.volTP1=0;s.volTP2=0;s.volTP3=lots;s.tp1Done=true;s.tp2Done=true;}
    g_ps[idx]=s;
@@ -3358,7 +4068,7 @@ void TryArm()
       sl=PriceNorm(sl);
    }
    else{sl=ComputeSL(dir,pending);slDist=MathAbs(pending-sl);}
-   double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason="lot/risk zero";return;}
+   double lots=CalculateLot(slDist,w,hv);if(lots<=0){g_gateReason=(g_lastRiskReason!=""?g_lastRiskReason:"lot/risk zero");return;}   // [SIZING] Auto mode BLOCKS on any solver gate (never manufactures volume)
    // [SR] optionally widen the stop behind an S/R zone, then recompute the lot so the
    // risk % stays IDENTICAL (constraint 6). Invalid recompute -> keep the base stop.
    if(InpSRSLBehindZone)
@@ -3389,18 +4099,24 @@ void TryArm()
          if(a1!=t1||a2!=t2||a3!=t3)
          {
             double netS=0;   // constraint 7: keep the snap only if the leg still passes its cost gate
-            if(NetProfitValid(dir,entry0,a1,lots,InpMinNetProfitTP1Money,netS)){t1=a1;t2=a2;t3=a3;g_srTpSnapped=true;}
+            double initR=CalculateRealTradeRiskMoney(dir,lots,entry0,sl);
+            if(NetProfitValid(dir,entry0,a1,lots,MinNetProfitForLeg(1,initR),netS)){t1=a1;t2=a2;t3=a3;g_srTpSnapped=true;}
          }
       }
    }
-   else BuildThreeTargets(dir,pending,lots,w,hv,t1,t2,t3);
+   else BuildThreeTargets(dir,pending,sl,lots,w,hv,t1,t2,t3);
    // [SR] entry gate before order dispatch for the complex branch as well
    {string srWhy2="";double srE=(dir>0?Ask():Bid());if(!SR_EntryAllowed(dir,srE,atr,atr,srWhy2)){g_gateReason=srWhy2;return;}}   // TryArm is void
    // R:R quality gate: the plan must genuinely out-earn its stop before arming.
    if(!InpSimpleScalpMode){
    if(!RRValid(dir,pending,sl,t2,InpMinRR_TP2)){g_gateReason="TP2 R:R below floor";return;}
    if(!RRValid(dir,pending,sl,t3,InpMinRR_TP3)){g_gateReason="TP3 R:R below floor";return;}}
-   double net1=0;if(!NetProfitValid(dir,pending,t1,lots,InpMinNetProfitTP1Money,net1)){g_gateReason="TP1 not cost-positive";return;}
+   double net1=0;
+   {
+      // [TP GATES] risk-relative TP1 viability (section 24): % of initial trade risk.
+      double initR1=CalculateRealTradeRiskMoney(dir,lots,pending,sl);
+      if(!NetProfitValid(dir,pending,t1,lots,MinNetProfitForLeg(1,initR1),net1)){g_gateReason="TP_NET_RISK_TOO_LOW";return;}
+   }
    // Phase 2.4: TP1 minimum-viability (spread-aware). If the ATR-derived TP1 is closer
    // than stops-level+buffer or (spread+expectedSlip) x InpTP1SpreadMultiple, REJECT the
    // trade - never silently widen TP1 beyond its cap.
@@ -3422,7 +4138,7 @@ void TryArm()
       double p=pending+dir*i*MathMax(layerGap*atr,MinTradeDistance());
       double li=(InpScaleIn?each*(1.0-0.15*i):each);
       li=FloorVolume(li);if(li<=0)continue;
-      double lsl=ComputeSL(dir,p);double a,b,c;BuildThreeTargets(dir,p,li,w,hv,a,b,c);ulong tk=0;
+      double lsl=ComputeSL(dir,p);double a,b,c;BuildThreeTargets(dir,p,lsl,li,w,hv,a,b,c);ulong tk=0;
       // Comment is the durable carrier of window / direction / HV regime across restarts.
       string cmt=InpComment+"|W"+IntegerToString((int)w)+"|"+(dir>0?"B":"S")+"|HV"+(hv?"1":"0")+"|"+setup;
       if(directional&&i==0)
@@ -3453,7 +4169,7 @@ void TryArm()
          if(InpUseSRZones&&g_atr>0){double ne,fe,st;int ix;double srx=(dir>0?Ask():Bid());
             if(SR_NearestAbove(srx,InpSRMinStrengthToUse,ne,fe,st,ix)){srUp=ne;srUpS=st;srUpD=MathAbs(ne-srx)/g_atr;}
             if(SR_NearestBelow(srx,InpSRMinStrengthToUse,ne,fe,st,ix)){srDn=ne;srDnS=st;srDnD=MathAbs(srx-ne)/g_atr;}}
-         FileWrite(g_log,TimeToString(ServerNow(),TIME_DATE|TIME_SECONDS),"ARM",WindowName(w),dir,setup,DoubleToString(SpreadPoints(),1),DoubleToString(SpreadPercentile(),1),DoubleToString(ATRPercentile(),1),DoubleToString(g_volRatio,2),DoubleToString(risk,2),DoubleToString(t1,broker.digits),DoubleToString(t2,broker.digits),DoubleToString(t3,broker.digits),srMd,IntegerToString(g_srCount),DoubleToString(srUp,broker.digits),DoubleToString(srUpS,2),DoubleToString(srUpD,2),DoubleToString(srDn,broker.digits),DoubleToString(srDnS,2),DoubleToString(srDnD,2),(g_srTpSnapped?"1":"0"),(g_srSlShifted?"1":"0"),g_srBlockReason);
+         FileWrite(g_log,TimeToString(ServerNow(),TIME_DATE|TIME_SECONDS),"ARM",WindowName(w),dir,setup,DoubleToString(SpreadPoints(),1),DoubleToString(SpreadPercentile(),1),DoubleToString(ATRPercentile(),1),DoubleToString(g_volRatio,2),DoubleToString(risk,2),DoubleToString(t1,broker.digits),DoubleToString(t2,broker.digits),DoubleToString(t3,broker.digits),srMd,IntegerToString(g_srCount),DoubleToString(srUp,broker.digits),DoubleToString(srUpS,2),DoubleToString(srUpD,2),DoubleToString(srDn,broker.digits),DoubleToString(srDnS,2),DoubleToString(srDnD,2),(g_srTpSnapped?"1":"0"),(g_srSlShifted?"1":"0"),g_srBlockReason,CapitalProfileName(g_capitalProfile),DoubleToString(GetEquityUSD(),2),DoubleToString(GetConservativeCapitalBase(),2),DoubleToString(GetEffectiveTradeRiskPct(w,hv),3),DoubleToString(g_lastAllowedRiskMoney,2),DoubleToString(g_lastRawLots,3),DoubleToString(g_lastFinalLots,3),DoubleToString(g_lastActualRiskMoney,2),DoubleToString(g_lastRequiredMargin,2),DoubleToString((g_atr>0?SpreadPoints()*broker.point/g_atr*100.0:0),2),IntegerToString(AdaptiveDeviationPoints()),DoubleToString((g_commissionRTPerLot>0?g_commissionRTPerLot:InpCommissionPerLotRTFallback),2),DoubleToString(ExpectedAllInCost(lots),2),g_lastRiskReason,IntegerToString(g_lastOrderCheckRetcode));
       }
    }
 }
@@ -3486,28 +4202,41 @@ void TryRecovery()
    if(now>g_lastLossTime+InpRecoveryMaxAgeSec){g_lastLossDir=0;return;} // opportunity expired
    if(g_paused||g_newsBlocked||ServerNow()<g_newsBlockedUntil)return;
    if(IsDisorder()||WeekendOrRollover()||InSwapDangerWindow())return;
-   if(CountOwnPositions()>=InpMaxConcurrentPositions)return;
+   if(CountOwnPositions()>=GetProfileMaxPositions())return;
 
    int dir=-g_lastLossDir;                                              // reversal trade against the losing leg
    if((dir>0&&g_dirBias<0)||(dir<0&&g_dirBias>0))return;                // only when structure actually agrees
-   double sp=SpreadPoints();if(sp>InpRecoveryMaxSpreadPts*g_ptScale){g_gateReason="recovery: spread";return;}
+   // [RECOVERY] stricter-than-normal adaptive spread quality (section 28): the
+   // recovery leg requires better execution conditions than a normal entry.
+   {
+      double allow=(InpUseAdaptiveSpreadGate?InpRecoveryMaxSpreadPts*InpRecoverySpreadQualityMultiplier:(double)InpRecoveryMaxSpreadPts);
+      double sp=SpreadPoints();
+      if(sp>allow*g_ptScale){g_gateReason="recovery: spread";g_spreadRejects++;return;}
+   }
 
    double entry=(dir>0?Ask():Bid());double atr=MathMax(g_atr,MinTradeDistance());
    double sl=ComputeSL(dir,entry);double slDist=MathAbs(entry-sl);if(slDist<=0)return;
-   double bal=AccountInfoDouble(ACCOUNT_BALANCE);
-   double risk=bal*InpRecoveryRiskPct/100.0;
-   double perLot=PriceMoveMoney(slDist,1.0)+ExpectedAllInCost(1.0);if(perLot<=0)return;
+   // [RECOVERY RISK] recovery risk stays <= InpRecoveryRiskPct AND strictly below the
+   // currently permitted normal trade risk (no martingale, no escalation; sections 28/36).
+   double cap=GetConservativeCapitalBase();
+   double bal=cap;
+   double risk=cap*InpRecoveryRiskPct/100.0;
+   double normalRisk=cap*GetEffectiveTradeRiskPct(WIN_NONE,false)/100.0;
+   if(risk>=normalRisk)risk=normalRisk*0.9;   // strictly below normal permitted risk
+   double perLot=CalculateRealTradeRiskMoney(dir,1.0,entry,sl);
+   if(perLot<=0)perLot=PriceMoveMoney(slDist,1.0)+ExpectedAllInCost(1.0);
+   if(perLot<=0)return;
    double lots=FloorVolume(risk/perLot);
    if(lots<=0 && InpAllowMinLotFallback)
    {
-      double minRisk=PriceMoveMoney(slDist,broker.volumeMin)+ExpectedAllInCost(broker.volumeMin);
-      if(bal>0 && minRisk/bal*100.0<=InpMinLotMaxRiskPct) lots=FloorVolume(broker.volumeMin);
+      double minRisk=CalculateRealTradeRiskMoney(dir,broker.volumeMin,entry,sl);
+      if(bal>0 && minRisk/bal*100.0<=GetProfileMinLotRiskCeilingPct()) lots=FloorVolume(broker.volumeMin);
    }
    if(lots<=0)return;
-   if(InpMaxTotalLots>0&&SumOwnLots()+lots>InpMaxTotalLots)lots=FloorVolume(InpMaxTotalLots-SumOwnLots());
+   if(InpUseAbsoluteLotEmergencyCap&&InpMaxTotalLots>0&&SumOwnLots()+lots>InpMaxTotalLots)lots=FloorVolume(InpMaxTotalLots-SumOwnLots());
    if(lots<=0)return;
 
-   double t1,t2,t3;BuildThreeTargets(dir,entry,lots,WIN_NONE,false,t1,t2,t3);
+   double t1,t2,t3;BuildThreeTargets(dir,entry,sl,lots,WIN_NONE,false,t1,t2,t3);
    // The recovery is a single-target trade: the TP placed at the broker must be the TP
    // that was validated. If the ATR-default target sits below the R:R floor, extend it
    // to the minimum target that satisfies BOTH the floor and the all-in cost check -
@@ -3515,11 +4244,22 @@ void TryRecovery()
    double md2=MinTradeDistance();
    double need=MathAbs(entry-sl)*InpRecoveryMinRR;
    if(MathAbs(t1-entry)<need) t1=PriceNorm(entry+(dir>0?need:-need));
+   double recInitRisk=CalculateRealTradeRiskMoney(dir,lots,entry,sl);
+   double recMin1=MinNetProfitForLeg(1,recInitRisk);
    double net=0;int gguard=0;
-   while(!NetProfitValid(dir,entry,t1,lots,InpMinNetProfitTP1Money,net)&&gguard++<10) t1=PriceNorm(t1+dir*0.10*atr);
+   while(!NetProfitValid(dir,entry,t1,lots,recMin1,net)&&gguard++<10) t1=PriceNorm(t1+dir*0.10*atr);
    if(!RRValid(dir,entry,sl,t1,InpRecoveryMinRR)){g_gateReason="recovery: R:R low";return;}
-   if(!NetProfitValid(dir,entry,t1,lots,InpMinNetProfitTP1Money,net)){g_gateReason="recovery: cost";return;}
+   if(!NetProfitValid(dir,entry,t1,lots,recMin1,net)){g_gateReason="recovery: cost";return;}
    if(!RiskRoom(PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots),dir,WIN_NONE,why)){g_gateReason="recovery: risk cap";return;}
+   // Preflight the recovery request exactly like a new trade (section 23).
+   {
+      MqlTradeRequest prq;MqlTradeCheckResult pchk;ZeroMemory(prq);ZeroMemory(pchk);
+      prq.action=TRADE_ACTION_DEAL;prq.symbol=eaSymbol;prq.magic=InpMagicNumber;prq.volume=lots;
+      prq.type=(dir>0?ORDER_TYPE_BUY:ORDER_TYPE_SELL);prq.price=entry;prq.sl=sl;prq.tp=t1;
+      prq.deviation=AdaptiveDeviationPoints();prq.comment="preflight";
+      string pr="";
+      if(!PreflightNewTrade(prq,pchk,pr)){g_gateReason="recovery: "+pr;return;}
+   }
 
    string cmt=InpComment+"|RCV|"+(dir>0?"B":"S")+"|"+IntegerToString((int)g_lastLossTime);
    double fill=0;ulong tk=0;
@@ -3661,7 +4401,7 @@ void FinalizeWindowTrade(int idx,double net,double gross,double costs)
    if(s.recovery){RemovePS(idx);return;}
    if(w<=WIN_NONE||w>=WIN_COUNT){RemovePS(idx);return;}
    g_ws[w].trades++;g_ws[w].netPL+=net;g_ws[w].grossPL+=gross;g_ws[w].costs+=costs;g_ws[w].slipSum+=MathAbs(s.entrySlipPts);g_ws[w].spreadPctSum+=s.entrySpreadPct;g_ws[w].atrPctSum+=s.entryAtrPct;g_ws[w].volRatioSum+=s.entryVolRatio;g_ws[w].maeSum+=s.maePrice;g_ws[w].mfeSum+=s.mfePrice;if(net>0){g_ws[w].wins++;g_consecutiveLosses=0;}else if(net<0){g_ws[w].losses++;g_consecutiveLosses++;}
-   double rr=(s.initialRiskMoney>0?net/s.initialRiskMoney:0);UpdateOverallPerformance(net,rr);g_ws[w].rSum+=rr;g_ws[w].peakNet=MathMax(g_ws[w].peakNet,g_ws[w].netPL);g_ws[w].maxDD=MathMax(g_ws[w].maxDD,g_ws[w].peakNet-g_ws[w].netPL);PushRecentNet(w,net);RefreshWindowGating(w);RemovePS(idx);
+   double rr=(s.initialRiskMoney>0?net/s.initialRiskMoney:0);UpdateOverallPerformance(net,rr);g_ws[w].rSum+=rr;PushRecentR(w,rr);g_ws[w].peakNet=MathMax(g_ws[w].peakNet,g_ws[w].netPL);g_ws[w].maxDD=MathMax(g_ws[w].maxDD,g_ws[w].peakNet-g_ws[w].netPL);PushRecentNet(w,net);RefreshWindowGating(w);RemovePS(idx);
 }
 
 void LearnCommission(double dealComm,double dealVol)
@@ -3711,7 +4451,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
             AddPositionState(ticket,posId,dir,w,setup,hvC,isRecovery,price,sl,fv,slip,HistoryDealGetDouble(trans.deal,DEAL_COMMISSION));
             // Charge the per-window risk budget for the ACTUAL fill (each straddle layer separately),
             // so partial/layered fills can never exceed the window budget.
-            if(!isRecovery&&w>WIN_NONE&&w<WIN_COUNT&&sl>0)g_windowRiskUsed[w]+=PriceMoveMoney(price-sl,fv)+ExpectedAllInCost(fv);
+            if(!isRecovery&&w>WIN_NONE&&w<WIN_COUNT&&sl>0){double rrM=CalculateRealTradeRiskMoney(dir,fv,price,sl);g_windowRiskUsed[w]+=(rrM>0?rrM:PriceMoveMoney(price-sl,fv)+ExpectedAllInCost(fv));}   // [COST BASIS] same authoritative engine as sizing
             if(InpCloseOnExtremeSlippage&&MathAbs(slip)>=InpExtremeSlippagePoints)ClosePositionSafe(ticket);
          }
                   if(!isRecovery)
@@ -3753,7 +4493,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 //====================================================================
 // STATE / LOGGING
 //====================================================================
-#define STATE_TAG 20260913
+#define STATE_TAG 20260914   // bumped: recent-R window history added to the state tail
 string StateName(){return "PAT101_"+eaSymbol+"_"+IntegerToString(InpMagicNumber)+".bin";}
 
 // Recount consecutive losses from actual closed deals (30-day lookback, this symbol+magic)
@@ -3780,6 +4520,8 @@ void SaveState()
    FileWriteInteger(f,STATE_TAG,INT_VALUE);
    FileWriteInteger(f,g_dayKey,INT_VALUE);FileWriteInteger(f,g_weekKey,INT_VALUE);FileWriteInteger(f,g_monthKey,INT_VALUE);FileWriteDouble(f,g_dayAnchor);FileWriteDouble(f,g_weekAnchor);FileWriteDouble(f,g_monthAnchor);FileWriteInteger(f,g_tradesToday,INT_VALUE);FileWriteInteger(f,g_consecutiveLosses,INT_VALUE);FileWriteDouble(f,g_commissionRTPerLot);FileWriteInteger(f,g_perfTrades,INT_VALUE);FileWriteInteger(f,g_perfWins,INT_VALUE);FileWriteInteger(f,g_perfLosses,INT_VALUE);FileWriteDouble(f,g_perfNetProfit);FileWriteDouble(f,g_perfGrossProfit);FileWriteDouble(f,g_perfGrossLoss);FileWriteInteger(f,g_perfRetN,INT_VALUE);FileWriteDouble(f,g_perfRetMean);FileWriteDouble(f,g_perfRetM2);FileWriteDouble(f,g_perfCumNet);FileWriteDouble(f,g_perfPeakNet);FileWriteDouble(f,g_perfMaxDDMoney);
    for(int w=0;w<WIN_COUNT;w++){FileWriteInteger(f,g_ws[w].trades,INT_VALUE);FileWriteInteger(f,g_ws[w].wins,INT_VALUE);FileWriteInteger(f,g_ws[w].losses,INT_VALUE);FileWriteDouble(f,g_ws[w].grossPL);FileWriteDouble(f,g_ws[w].netPL);FileWriteDouble(f,g_ws[w].costs);FileWriteInteger(f,g_ws[w].tp1Hits,INT_VALUE);FileWriteInteger(f,g_ws[w].tp2Hits,INT_VALUE);FileWriteInteger(f,g_ws[w].tp3Hits,INT_VALUE);}
+   // [PERFORMANCE GATING] rolling recent-R history (additive tail; old readers stop at the PS count safely)
+   for(int w=0;w<WIN_COUNT;w++){FileWriteInteger(f,g_ws[w].recentRCount,INT_VALUE);for(int i=0;i<64;i++)FileWriteDouble(f,g_ws[w].recentR[i]);FileWriteInteger(f,g_ws[w].recentRIdx,INT_VALUE);}
    // --- open-position ladder plans: a VPS restart must not silently drop the
    // --- 60/25/15 partial management and leave positions broker-managed to TP3/SL.
    int nPS=ArraySize(g_ps);FileWriteInteger(f,nPS,INT_VALUE);
@@ -3810,6 +4552,8 @@ void LoadState()
    if(tag!=STATE_TAG){FileClose(f);Print("State file format differs (tag=",tag,") - starting from a clean slate.");return;}
    g_dayKey=(int)FileReadInteger(f,INT_VALUE);g_weekKey=(int)FileReadInteger(f,INT_VALUE);g_monthKey=(int)FileReadInteger(f,INT_VALUE);g_dayAnchor=FileReadDouble(f);g_weekAnchor=FileReadDouble(f);g_monthAnchor=FileReadDouble(f);g_tradesToday=(int)FileReadInteger(f,INT_VALUE);g_consecutiveLosses=(int)FileReadInteger(f,INT_VALUE);g_commissionRTPerLot=FileReadDouble(f);if(!FileIsEnding(f)){g_perfTrades=(int)FileReadInteger(f,INT_VALUE);g_perfWins=(int)FileReadInteger(f,INT_VALUE);g_perfLosses=(int)FileReadInteger(f,INT_VALUE);g_perfNetProfit=FileReadDouble(f);g_perfGrossProfit=FileReadDouble(f);g_perfGrossLoss=FileReadDouble(f);g_perfRetN=(int)FileReadInteger(f,INT_VALUE);g_perfRetMean=FileReadDouble(f);g_perfRetM2=FileReadDouble(f);g_perfCumNet=FileReadDouble(f);g_perfPeakNet=FileReadDouble(f);g_perfMaxDDMoney=FileReadDouble(f);}
    for(int w=0;w<WIN_COUNT&&!FileIsEnding(f);w++){g_ws[w].trades=(int)FileReadInteger(f,INT_VALUE);g_ws[w].wins=(int)FileReadInteger(f,INT_VALUE);g_ws[w].losses=(int)FileReadInteger(f,INT_VALUE);g_ws[w].grossPL=FileReadDouble(f);g_ws[w].netPL=FileReadDouble(f);g_ws[w].costs=FileReadDouble(f);g_ws[w].tp1Hits=(int)FileReadInteger(f,INT_VALUE);g_ws[w].tp2Hits=(int)FileReadInteger(f,INT_VALUE);g_ws[w].tp3Hits=(int)FileReadInteger(f,INT_VALUE);}
+   // [PERFORMANCE GATING] R-history tail (only present in new-format state files)
+   if(!FileIsEnding(f))for(int w=0;w<WIN_COUNT&&!FileIsEnding(f);w++){g_ws[w].recentRCount=(int)FileReadInteger(f,INT_VALUE);for(int i=0;i<64&&!FileIsEnding(f);i++)g_ws[w].recentR[i]=FileReadDouble(f);if(!FileIsEnding(f))g_ws[w].recentRIdx=(int)FileReadInteger(f,INT_VALUE);}
    // --- open-position ladder plans (only re-attached if the position still exists)
    if(!FileIsEnding(f))
    {
@@ -3848,7 +4592,7 @@ void LoadState()
 void OpenLog()
 {
    if(!InpUseLogFile)return;string n="PAT101_"+eaSymbol+"_"+TimeToString(ServerNow(),TIME_DATE)+".csv";StringReplace(n,".","-");StringReplace(n,":","-");
-   g_log=FileOpen(n,FILE_CSV|FILE_READ|FILE_WRITE|FILE_SHARE_READ|FILE_COMMON,';');if(g_log==INVALID_HANDLE)return;if(FileSize(g_log)==0)FileWrite(g_log,"server_time","event","window","dir","setup","spread_pts","spread_pct","atr_pct","vol_ratio","risk_money","tp1","tp2","tp3","sr_mode","sr_zone_count","sr_up_price","sr_up_strength","sr_up_dist_atr","sr_dn_price","sr_dn_strength","sr_dn_dist_atr","sr_tp_snapped","sr_sl_shifted","sr_block_reason");FileSeek(g_log,0,SEEK_END);
+   g_log=FileOpen(n,FILE_CSV|FILE_READ|FILE_WRITE|FILE_SHARE_READ|FILE_COMMON,';');if(g_log==INVALID_HANDLE)return;if(FileSize(g_log)==0)FileWrite(g_log,"server_time","event","window","dir","setup","spread_pts","spread_pct","atr_pct","vol_ratio","risk_money","tp1","tp2","tp3","sr_mode","sr_zone_count","sr_up_price","sr_up_strength","sr_up_dist_atr","sr_dn_price","sr_dn_strength","sr_dn_dist_atr","sr_tp_snapped","sr_sl_shifted","sr_block_reason","capital_profile","equity_usd","capital_base","effective_risk_pct","allowed_risk_money","raw_lots","final_lots","actual_risk_money","required_margin","spread_to_atr_pct","adaptive_deviation","commission_rt_lot","expected_allin_cost","sizing_reason","ordercheck_retcode");FileSeek(g_log,0,SEEK_END);
 }
 
 void PrintSummary()
@@ -3878,6 +4622,20 @@ void WritePerformanceReport()
    FileWrite(f,"metric","value");
    FileWrite(f,"number_of_trades",g_perfTrades);FileWrite(f,"wins",g_perfWins);FileWrite(f,"losses",g_perfLosses);FileWrite(f,"win_rate_pct",DoubleToString(OverallWinRate(),4));FileWrite(f,"profit_factor",DoubleToString(OverallProfitFactor(),4));FileWrite(f,"net_R_per_trade",DoubleToString(OverallNetR(),4));FileWrite(f,"sharpe_trade_R",DoubleToString(OverallSharpe(),4));FileWrite(f,"net_profit",DoubleToString(g_perfNetProfit,2));FileWrite(f,"max_drawdown_money",DoubleToString(g_perfMaxDDMoney,2));FileWrite(f,"max_intraday_drawdown_pct",DoubleToString(g_maxDDSeen,4));FileWrite(f,"avg_slippage_points",DoubleToString(g_slipAvg,3));FileWrite(f,"last_slippage_points",DoubleToString(g_lastSlipPts,3));FileWrite(f,"avg_spread_points",DoubleToString(g_spreadAvg,2));FileWrite(f,"commission_rt_per_lot",DoubleToString(g_commissionRTPerLot>0?g_commissionRTPerLot:InpCommissionPerLotRTFallback,4));
    FileWrite(f,"fmp_usd_avg_pct",DoubleToString(g_usdAvg,4));FileWrite(f,"fmp_usd_bias",g_usdBias);FileWrite(f,"fmp_spx_move_pct",DoubleToString(g_spxMovePct,4));FileWrite(f,"fmp_available",(g_usdAvailable?"YES":"NO"));FileWrite(f,"fmp_news_hits",g_fmpNewsCount);
+   FileWrite(f,"capital_profile",CapitalProfileName(g_capitalProfile));
+   FileWrite(f,"account_currency",broker.currency);
+   FileWrite(f,"equity_usd",DoubleToString(GetEquityUSD(),2));
+   FileWrite(f,"average_effective_risk_pct",DoubleToString(GetEffectiveTradeRiskPct(WIN_NONE,false),3));
+   FileWrite(f,"average_actual_R",DoubleToString(OverallNetR(),4));
+   FileWrite(f,"window_expectancy_R_sydney",DoubleToString(WindowExpectancyR(WIN_SYDNEY),4));
+   FileWrite(f,"window_expectancy_R_tokyo",DoubleToString(WindowExpectancyR(WIN_TOKYO),4));
+   FileWrite(f,"window_expectancy_R_london",DoubleToString(WindowExpectancyR(WIN_LONDON),4));
+   FileWrite(f,"window_expectancy_R_newyork",DoubleToString(WindowExpectancyR(WIN_NEWYORK),4));
+   FileWrite(f,"min_lot_rejects",g_minLotRejects);
+   FileWrite(f,"margin_rejects",g_marginRejects);
+   FileWrite(f,"spread_rejects",g_spreadRejects);
+   FileWrite(f,"slippage_rejects",g_slipRejects);
+   FileWrite(f,"ordercheck_rejects",g_orderCheckRejects);
    FileClose(f);
 }//====================================================================
 // DASHBOARD - flow-layout two-column control panel (overlap-proof)
@@ -4195,9 +4953,25 @@ void DashUpdate(bool force=false)
    DashRow("R_DD",1,yR,"Day DD "+DoubleToString(dd,2)+"%/"+DoubleToString(InpDailyLossPercent,2)+"%  Wk "+DoubleToString((g_weekAnchor>0?(g_weekAnchor-eq)/g_weekAnchor*100:0),2)+"%",
            (dd>=InpDailyLossPercent?C_DN_TXT:(dd>InpMaxFloatingDDPercent*0.7?C_WARN_TXT:C_TXT)));
    DashRow("R_MRG",1,yR,"Margin "+DoubleToString(margin,2)+" ("+DoubleToString(marginPct,1)+"%)  Free "+DoubleToString(freeM,2),(marginPct>50?C_WARN_TXT:C_TXT2));
-   DashRow("R_POS",1,yR,"Positions "+IntegerToString(CountOwnPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+"  Lots "+DoubleToString(SumOwnLots(),2),C_TXT);
+   DashRow("R_POS",1,yR,"Positions "+IntegerToString(CountOwnPositions())+"/"+IntegerToString(GetProfileMaxPositions())+"  Lots "+DoubleToString(SumOwnLots(),2),C_TXT);
    DashRow("R_RISK",1,yR,"Risk $"+DoubleToString(openRisk,2)+" ("+DoubleToString(riskPct,2)+"%/"+DoubleToString(InpMaxAggregateOpenRiskPct,2)+"%)",(riskPct>InpMaxAggregateOpenRiskPct?C_DN_TXT:C_TXT));
    DashRow("R_BUD",1,yR,"Budget $"+DoubleToString(g_windowRiskUsed[wi],2)+" ("+DoubleToString(budgetPct,2)+"%/"+DoubleToString(InpPerWindowRiskBudgetPct,2)+"%)",(budgetPct>=InpPerWindowRiskBudgetPct?C_WARN_TXT:C_TXT2));
+   //--- [CAPITAL ENGINE] compact adaptive-engine telemetry (section 38; cached values only)
+   {
+      string capLine="Prof "+CapitalProfileName(g_capitalProfile)+"  EqUSD "+DoubleToString(GetEquityUSD(),0)
+                    +"  Cap "+DoubleToString(GetConservativeCapitalBase(),2)
+                    +(g_usdConvertNote!=""?("  ["+g_usdConvertNote+"]"):"");
+      DashRow("R_CAP",1,yR,capLine,(g_usdConvertNote!=""?C_WARN_TXT:C_TXT));
+      double effR=GetEffectiveTradeRiskPct(w,false);
+      DashRow("R_CAP2",1,yR,"Risk eff "+DoubleToString(effR,3)+"%  $"+DoubleToString(GetConservativeCapitalBase()*effR/100.0,2)
+                    +"  minLot<= "+DoubleToString(GetProfileMinLotRiskCeilingPct(),2)+"%"
+                    +"  pos "+IntegerToString(GetProfileMaxPositions()),C_TXT2);
+      string volLine="Vol "+DoubleToString(broker.volumeMin,2)+"/"+DoubleToString(broker.volumeStep,2)+"/"+DoubleToString(broker.volumeMax,2)
+                    +"  Lim "+(broker.volumeLimit>0?DoubleToString(broker.volumeLimit,2):"-");
+      DashRow("R_VOL",1,yR,volLine,C_TXT2);
+      double spATR=(g_atr>0?sp*broker.point/g_atr*100.0:0);
+      DashRow("R_ADAPT",1,yR,"Sprd/ATR "+DoubleToString(spATR,1)+"%  Dev "+IntegerToString(AdaptiveDeviationPoints())+"pt  Chk "+(g_lastOrderCheckRetcode==0?"OK":IntegerToString(g_lastOrderCheckRetcode)),C_TXT2);
+   }
 
    DashSection("RE",1,yR,"execution");
    DashRow("R_GATE",1,yR,"GATE: "+g_gateReason,(StringFind(g_gateReason,"ARMED")>=0||StringFind(g_gateReason,"RECOVERY")>=0?C_UP_TXT:(halted?C_DN_TXT:(g_paused?C_WARN_TXT:C_DIM))));
@@ -4345,6 +5119,10 @@ int OnInit()
     if(sx>=0&&sy>=0){g_x=sx;g_y=sy;}}
    ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
    PrintSessionMapAudit();UpdateRiskPeriods();if(InpPersistState)LoadState();
+   // [CAPITAL ENGINE] classify once at init + log the profile environment
+   g_capitalProfile=GetCapitalProfile();
+   Print("CAPITAL ENGINE: profile=",CapitalProfileName(g_capitalProfile)," equity=",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)," ",broker.currency," equityUSD=",DoubleToString(GetEquityUSD(),2)," capitalBase=",DoubleToString(GetConservativeCapitalBase(),2)," baseRisk=",DoubleToString(GetProfileBaseRiskPct(),3),"% aggregate=",DoubleToString(GetProfileAggregateRiskPct(),2),"% maxPositions=",GetProfileMaxPositions(),(g_usdConvertNote!=""?" ["+g_usdConvertNote+"]":""));
+   CapitalSelfTest();
    // A consecutive-loss streak must never survive a restart as a halt: recount it from
    // real deal history (the persisted counter is a stats value, not a live breaker).
    if(InpPersistState)
@@ -4408,6 +5186,9 @@ void OnTick()
 void OnTimer()
 {
    RefreshServerOffset(false);CheckNews(false);RefreshFMPMacro(false);EnforceSwapFlat();if(InpCancelStalePendings)DeleteOwnPendings(true);DashUpdate(true);SR_SelfTest();if(InpPersistState && (ServerNow()%30)==0)SaveState();
+   // [CAPITAL ENGINE] profile recompute on the 1s timer: cheap (equity + cached FX),
+   // detects deposits/withdrawals/equity drift across tier boundaries within a minute.
+   g_capitalProfile=GetCapitalProfile();
    if(InpLicenseKey!="" && TimeCurrent()>=g_nextLicenseCheck)   // [LICENSE] WebRequest ONLY here, never in hot paths
    {
       CheckLicense();
