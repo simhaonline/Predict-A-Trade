@@ -5547,20 +5547,44 @@ bool ReadStateText(int f,string &value)
    return StringLen(value)==len;
 }
 
-// Recount consecutive losses from actual closed deals (30-day lookback, this symbol+magic)
+// Recount consecutive losses from actual closed deals. [FIX 2026-09-09] TWO bugs fixed:
+// (1) the old 30-day lookback resurrected losing streaks from previous days on every
+//     EA restart/reattach — the live counter resets at day rollover, so the recount must
+//     be day-scoped too or a fresh attach starts paused ("ENTRY_GATE consecutive-loss
+//     pause" immediately after recompile/reattach);
+// (2) it counted per-DEAL, so TP partial closes multiplied: a 3-TP trade banking TP1
+//     (positive deal) then closing the remainder at BE-minus-cost (negative deal) was
+//     counted as a loss. Now one entry per POSITION (all OUT deals of a position
+//     aggregated), newest-first, matching FinalizeWindowTrade's per-position semantics.
 int RecountConsecutiveLosses()
 {
    int cons=0;
-   datetime from=TimeCurrent()-30*86400;
-   if(!HistorySelect(from,TimeCurrent()+60))return g_consecutiveLosses;
-   for(int i=HistoryDealsTotal()-1;i>=0;i--)
+   datetime now=TimeCurrent(),dayStart=now-(now%86400);   // start of the current server day
+   if(!HistorySelect(dayStart,now+60))return g_consecutiveLosses;
+   int total=HistoryDealsTotal();if(total<=0)return 0;
+   long ids[];double nets[];datetime lastT[];
+   ArrayResize(ids,total);ArrayResize(nets,total);ArrayResize(lastT,total);
+   int n=0;
+   for(int i=0;i<total;i++)   // oldest -> newest
    {
       ulong tk=HistoryDealGetTicket(i);if(tk==0)continue;
       if(HistoryDealGetInteger(tk,DEAL_MAGIC)!=InpMagicNumber)continue;
       if(HistoryDealGetString(tk,DEAL_SYMBOL)!=eaSymbol)continue;
       if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk,DEAL_ENTRY)!=DEAL_ENTRY_OUT)continue;
+      long id=HistoryDealGetInteger(tk,DEAL_POSITION_ID);
       double p=HistoryDealGetDouble(tk,DEAL_PROFIT)+HistoryDealGetDouble(tk,DEAL_SWAP)+HistoryDealGetDouble(tk,DEAL_COMMISSION);
-      if(p<0)cons++;else break;   // streak broken by a win
+      datetime dt=(datetime)HistoryDealGetInteger(tk,DEAL_TIME);
+      int k=-1;for(int j=0;j<n;j++)if(ids[j]==id){k=j;break;}
+      if(k<0){ids[n]=id;nets[n]=p;lastT[n]=dt;n++;}
+      else{nets[k]+=p;if(dt>lastT[k])lastT[k]=dt;}   // aggregate partial closes of one position
+   }
+   bool used[];ArrayResize(used,n);for(int j=0;j<n;j++)used[j]=false;
+   for(int step=0;step<n;step++)   // walk closed positions newest -> oldest
+   {
+      int bi=-1;datetime bt=0;
+      for(int j=0;j<n;j++)if(!used[j]&&lastT[j]>bt){bt=lastT[j];bi=j;}
+      if(bi<0)break;used[bi]=true;
+      if(nets[bi]<0)cons++;else break;   // streak broken by a winning position
    }
    return cons;
 }
@@ -6258,8 +6282,10 @@ int OnInit()
    if(InpPersistState)
    {
       g_consecutiveLosses=RecountConsecutiveLosses();
+      // [FIX 2026-09-09] always log the recount (was hidden behind the self-test flag):
+      // makes a day-scoped, per-position streak visible immediately after attach.
+      Print("Consecutive losses recounted (today, per-position): ",g_consecutiveLosses,"/",InpMaxConsecutiveLosses);
       // A latched loss breaker remains set until its risk period rolls over.
-      if(InpRunInitSelfTests)Print("Consecutive losses recounted: ",g_consecutiveLosses,"/",InpMaxConsecutiveLosses);
    }OpenLog();IsNewBar();UpdateSpreadStats();UpdateIndicators();RefreshVolumeRatio();RefreshFMPMacro(true);UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();EventSetTimer(1);g_gateReason="initialized";DashUpdate(true);
    Print("Predict-A-Trade v2.11 initialized | ",eaSymbol," | digits=",broker.digits," ptScale=",g_ptScale," | server-UTC offset=",g_serverOffsetSec,"s | minVol=",broker.volumeMin," step=",broker.volumeStep," stops=",broker.stopsLevel," freeze=",broker.freezeLevel," hedging=",broker.hedging);
    Print("Broker: ",broker.company," | ",AccTypeName(broker.tradeMode)," account | leverage 1:",broker.leverage," | swap L/S ",DoubleToString(broker.swapLong,2),"/",DoubleToString(broker.swapShort,2));
