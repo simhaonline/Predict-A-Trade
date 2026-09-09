@@ -2302,31 +2302,40 @@ void UpdateIndicators()
 {
    datetime bar=iTime(eaSymbol,PERIOD_M1,1);
    if(bar==g_indicatorBar&&g_indicatorsReady)return;
-   g_indicatorsReady=false;
+   //--- [ROOT-CAUSE FIX] the old version required ALL 20 CopyBuffer calls across M1/M5/
+   //--- M15/M30/H1 to succeed in ONE pass; a single higher-TF miss (async data load in
+   //--- the tester / cold attach) left g_indicatorsReady=false forever, and
+   //--- EvaluateScalpSignal returned at its ready-check -> "no scalp signal" on every
+   //--- bar while ATR (copied first) still displayed live values. Now: M1 indicators
+   //--- gate readiness; higher-TF failures degrade to stale caches and retry per tick.
+   bool ok=true;
    if(bar<=0||!Copy1(hATR,0,1,g_atr)||g_atr<=0)return;
-   if(!Copy1(hADX,0,1,g_adx)||!Copy1(hADX,1,1,g_adxPlus)||!Copy1(hADX,2,1,g_adxMinus))return;
-   if(!Copy1(hEMA20,0,1,g_ema20)||!Copy1(hEMA50,0,1,g_ema50))return;
-   if(!Copy1(hH1EMA20,0,1,g_h1e20)||!Copy1(hH1EMA50,0,1,g_h1e50))return;
-   if(!Copy1(hM15EMA20,0,1,g_m15e20)||!Copy1(hM15EMA50,0,1,g_m15e50))return;
-   if(InpUseMTFAlignment&&(!Copy1(hM30E20,0,1,g_m30e20)||!Copy1(hM30E50,0,1,g_m30e50)))return;
-   if(!Copy1(hRSI,0,1,g_rsi)||!Copy1(hM5E20,0,1,g_m5e20)||!Copy1(hM5E50,0,1,g_m5e50))return;
-   if(!Copy1(hM5ADX,0,1,g_m5adx)||!Copy1(hM5ADX,1,1,g_m5adxPlus)||!Copy1(hM5ADX,2,1,g_m5adxMinus))return;
+   PushATR(g_atr);
+   ok&=Copy1(hADX,0,1,g_adx)&&Copy1(hADX,1,1,g_adxPlus)&&Copy1(hADX,2,1,g_adxMinus);
+   ok&=Copy1(hEMA20,0,1,g_ema20)&&Copy1(hEMA50,0,1,g_ema50);
+   ok&=Copy1(hRSI,0,1,g_rsi);
+   //--- M5 evidence (pullback/momentum trend): fallback to M1 EMAs handled by callers
+   bool m5ok=Copy1(hM5E20,0,1,g_m5e20)&&Copy1(hM5E50,0,1,g_m5e50)
+            &&Copy1(hM5ADX,0,1,g_m5adx)&&Copy1(hM5ADX,1,1,g_m5adxPlus)&&Copy1(hM5ADX,2,1,g_m5adxMinus);
+   if(!m5ok&&g_m5e20==0){g_m5e20=g_ema20;g_m5e50=g_ema50;}   // seed from M1 so setups fire
+   //--- higher TFs: stale-tolerant, retried every tick until they load
+   Copy1(hH1EMA20,0,1,g_h1e20);Copy1(hH1EMA50,0,1,g_h1e50);
+   Copy1(hM15EMA20,0,1,g_m15e20);Copy1(hM15EMA50,0,1,g_m15e50);
+   if(InpUseMTFAlignment){Copy1(hM30E20,0,1,g_m30e20);Copy1(hM30E50,0,1,g_m30e50);}
    //--- [SIGNAL QUALITY] EMA9 / EMA200 / MACD (sections 4/5/6)
-   if(hEMA9!=INVALID_HANDLE&&!Copy1(hEMA9,0,1,g_ema9))return;
-   if(hEMA200!=INVALID_HANDLE&&!Copy1(hEMA200,0,1,g_ema200))return;
+   if(hEMA9!=INVALID_HANDLE)Copy1(hEMA9,0,1,g_ema9);
+   if(hEMA200!=INVALID_HANDLE)Copy1(hEMA200,0,1,g_ema200);
    if(hMACD!=INVALID_HANDLE)
    {
       double m=0,sg=0;
       if(Copy1(hMACD,0,1,m)&&Copy1(hMACD,1,1,sg))
       {
          double pm=0,ps=0;
-         if(!Copy1(hMACD,0,2,pm)||!Copy1(hMACD,1,2,ps))return;
-         g_macdHistPrev=pm-ps;
-         g_macdMain=m;g_macdSignal=sg;g_macdHist=m-sg;
+         if(Copy1(hMACD,0,2,pm)&&Copy1(hMACD,1,2,ps)){g_macdHistPrev=pm-ps;g_macdMain=m;g_macdSignal=sg;g_macdHist=m-sg;}
       }
-      else return;
    }
-   PushATR(g_atr);g_indicatorBar=bar;g_indicatorsReady=true;
+   g_indicatorBar=bar;
+   g_indicatorsReady=(ok&&g_atr>0&&g_ema20>0&&g_rsi>0);   // M1 core only - higher TFs degrade
 }
 
 double VolumeRatio(int shift=1)
