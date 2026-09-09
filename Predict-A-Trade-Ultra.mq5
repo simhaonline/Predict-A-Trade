@@ -4308,8 +4308,9 @@ void BuildThreeTargets(int dir,double entry,double sl,double lots,ENUM_WINDOW_ID
    double net=0;int guard=0;
    // [TP GATES] risk-relative minimum net profit = % of this trade's INITIAL RISK
    // (initialRiskMoney = SL loss + all-in cost at the actual volume; section 24).
-   double initialRisk=CalculateRealTradeRiskMoney(dir,lots,entry,sl);   // authoritative: SL loss + all-in cost (section 16/24)
-   if(initialRisk<=0)initialRisk=PriceMoveMoney(MathAbs(entry-sl),lots)+ExpectedAllInCost(lots);   // fallback parity
+   //--- [FIX] base = pure SL-loss money; costs are already netted inside NetProfitValid
+   double initialRisk=PriceMoveMoney(MathAbs(entry-sl),lots);
+   if(initialRisk<=0)initialRisk=CalculateRealTradeRiskMoney(dir,lots,entry,sl);   // fallback
    double min1=MinNetProfitForLeg(1,initialRisk),min2=MinNetProfitForLeg(2,initialRisk),min3=MinNetProfitForLeg(3,initialRisk);
    while(!NetProfitValid(dir,entry,tp1,v1,min1,net)&&guard++<10)
    {double nxt=tp1+dir*0.10*atr;if((nxt-entry)*dir>=(tp2-entry)*dir)break;tp1=nxt;}   // [D] never walk TP1 past TP2
@@ -4745,7 +4746,7 @@ void TryArm()
          if(a1!=t1||a2!=t2||a3!=t3)
          {
             double netS=0;   // constraint 7: keep the snap only if the leg still passes its cost gate
-            double initR=CalculateRealTradeRiskMoney(dir,lots,entry0,sl);
+            double initR=PriceMoveMoney(MathAbs(entry0-sl),lots);   // [FIX] SL-loss-only base
             if(NetProfitValid(dir,entry0,a1,lots,MinNetProfitForLeg(1,initR),netS)){t1=a1;t2=a2;t3=a3;g_srTpSnapped=true;}
          }
       }
@@ -4760,8 +4761,11 @@ void TryArm()
    double net1=0;
    {
       // [TP GATES] risk-relative TP1 viability (section 24): % of initial trade risk.
-      double initR1=CalculateRealTradeRiskMoney(dir,lots,pending,sl);
-      if(!NetProfitValid(dir,pending,t1,lots,MinNetProfitForLeg(1,initR1),net1)){g_gateReason="TP_NET_RISK_TOO_LOW";return;}
+      //--- [FIX] base = pure SL-loss money (OrderCalcProfit), NOT SL+costs: costs are
+      //--- already netted inside NetProfitValid; including them in the base made the
+      //--- minimum scale WITH the cost and veto every min-lot trade at normal ATR.
+      double slLossOnly=PriceMoveMoney(sl,lots);
+      if(!NetProfitValid(dir,pending,t1,lots,MinNetProfitForLeg(1,slLossOnly),net1)){g_gateReason="TP_NET_RISK_TOO_LOW";return;}
    }
    // Phase 2.4: TP1 minimum-viability (spread-aware). If the ATR-derived TP1 is closer
    // than stops-level+buffer or (spread+expectedSlip) x InpTP1SpreadMultiple, REJECT the
