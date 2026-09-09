@@ -251,7 +251,7 @@ input int    InpDisorderCooldownMinutes   = 5;
 
 input group "=== FMP MACRO / NEWS (OBFUSCATED CREDENTIALS) ==="
 input bool   InpUseFMP                    = true;      // FMP stable REST macro adapter (primary intermarket source)
-input int    InpFMPRefreshSec             = 600;        // quote refresh throttle (rate-limit friendly)
+input int    InpFMPRefreshSec             = 600;        // quote refresh throttle (floor 3600s enforced - see RefreshFMPMacro)
 input int    InpFMPTimeoutMs              = 5000;      // per-request HTTP timeout
 input double InpFMPUSDPairMinPct          = 0.020;     // min averaged USD-basket move % for a directional vote
 input bool   InpFMPIncludeSPX             = true;      // S&P 500 risk sentiment vote (risk-off = gold bid)
@@ -2134,39 +2134,23 @@ bool JsonNumber(const string text,const string key,double &value)
 bool FMPQuoteBatch(string &syms[],double &chg[],int count)
 {
    if(MQLInfoInteger(MQL_TESTER))return false;
-   string list="";
-   for(int i=0;i<count;i++){list+=(i>0?",":"")+syms[i];}
-   string url=FMPBase()+"/quote?symbol="+list+"&apikey="+FMPKey();
-   string body;
-   if(HttpGet(url,InpFMPTimeoutMs,body)<=0)return false;
-   if(StringFind(body,"Error Message")>=0||StringFind(body,"Restricted Endpoint")>=0||StringFind(body,"Premium Query")>=0)
-   { g_fmpLastErr="batch plan-restricted"; return false; }
-   // Response: array of objects {"symbol":"EURUSD",...,"changePercentage":0.5,...}
-   // For each requested symbol, locate its object and parse changePercentage.
+   // Live probe 2026-09-09: FMP free plan returns 402 Premium for ANY multi-symbol
+   // batch on /stable/quote, while every SINGLE-symbol call is 200. The old
+   // one-request batch therefore never yielded data and the panel stayed
+   // "feed OFF" forever. Loop single quotes instead (8 requests per cycle; the
+   // 3600s floor in RefreshFMPMacro keeps the daily total inside the free plan).
+   int okN=0;
    for(int i=0;i<count;i++)
    {
       chg[i]=0;
-      int si=StringFind(body,"\"symbol\":\""+syms[i]+"\"");
-      if(si<0)continue;
-      int cp=StringFind(body,"changePercentage",si);
-      if(cp<0)continue;
-      int p=cp+StringLen("changePercentage");
-      while(p<StringLen(body))
-      {
-         ushort c=StringGetCharacter(body,p);
-         if(c==' '||c==':'||c=='\t'){p++;continue;}
-         break;
-      }
-      string num="";
-      while(p<StringLen(body))
-      {
-         ushort c=StringGetCharacter(body,p);
-         if((c>='0'&&c<='9')||c=='-'||c=='+'||c=='.'||c=='e'||c=='E'){num+=CharToString((uchar)c);p++;}
-         else break;
-      }
-      chg[i]=StringToDouble(num);
+      double price=0;
+      if(FMPQuote(syms[i],chg[i],price))okN++;
    }
-   return true;
+   // Tolerant: succeed if at most 2 pairs failed (matches the basket's own
+   // "tolerate up to 2 dead pairs" rule); failed entries carry chg=0 and are
+   // diluted out of the USD average exactly like missing symbols in the old
+   // batch response parser.
+   return (okN>0 && okN>=count-2);
 }
 
 bool FMPQuote(string sym,double &chgPct,double &price)
@@ -2185,10 +2169,14 @@ bool FMPQuote(string sym,double &chgPct,double &price)
 void FMPNewsScan()
 {
    if(!InpUseFMP||MQLInfoInteger(MQL_TESTER))return;
+   // Live probe 2026-09-09: /stable/news returns 404 on this plan (endpoint
+   // removed from the free tier - legacy /api/v3 news is 403 for post-Aug-2025
+   // keys). Keep the scan wired for plan tiers where it exists; on 404 the
+   // parse below is a no-op and g_fmpNewsCount stays 0 (panel shows "none").
    string url=FMPBase()+"/news?limit="+IntegerToString(InpFMPNewsLimit)+"&page=0&apikey="+FMPKey();
    string body;
    if(HttpGet(url,InpFMPTimeoutMs,body)<=0)return;
-   if(StringLen(body)<10)return;
+   if(StringFind(body,"\"title\"")<0)return;   // 404 body "[]" or error object: not news data
    // Count gold-relevant headlines and keep the newest title for the panel.
    int hits=0;string newest="";int pos=0;
    string pat="\"title\"";
@@ -2231,14 +2219,18 @@ void RefreshFMPMacro(bool force=false)
       return;
    }
    datetime now=ServerNow();
-   // Rate-limit defense (HTTP 429): base cycle 600s, doubled per consecutive 429 up to 1h.
+   // Rate-limit defense (HTTP 429). Live probe 2026-09-09: the multi-symbol
+   // batch endpoint is premium (402), so quotes now cost 7-8 single requests
+   // per cycle. Base cycle 3600s keeps the free plan's ~250/day budget intact
+   // (8*24=192 quote calls + 8 news = 200/day); doubles per consecutive 429.
    int effSec=InpFMPRefreshSec;                       // input is in SECONDS
-   if(g_fmp429Count>0)effSec=(int)MathMin(3600,600.0*MathPow(2,MathMin(3,g_fmp429Count)));
+   if(effSec<3600)effSec=3600;                        // floor: singles are ~8x the old batch cost
+   if(g_fmp429Count>0)effSec=(int)MathMin(7200,3600.0*MathPow(2,MathMin(2,g_fmp429Count)));
    if(!force && g_fmpLastTry>0 && now-g_fmpLastTry<effSec)return;
    g_fmpLastTry=now;
    bool doNews=(g_fmpCycle%3==0);   // news every 3rd cycle: keeps daily total under the free-plan quota
 
-   // ONE batch request for the whole USD basket (+SPX) - free-plan friendly.
+   // Single-symbol loop (see FMPQuoteBatch): batch endpoint is premium-gated.
    string syms[FMPUSD_COUNT+1];
    for(int i=0;i<FMPUSD_COUNT;i++)syms[i]=g_usdPairs[i];
    int batchN=FMPUSD_COUNT;
@@ -2256,7 +2248,7 @@ void RefreshFMPMacro(bool force=false)
    if(!g_usdAvailable && g_fmpEverOK==false && g_fmpErrCount==1)
    {
       if(StringFind(g_fmpLastErr,"429")>=0)
-         Print("FMP quota exhausted (HTTP 429): free plan allows ~250 requests/day. The EA now polls once per ",effSec,"s with batched requests (~180/day) and will recover automatically when the quota resets.");
+         Print("FMP quota exhausted (HTTP 429): free plan allows ~250 requests/day. The EA polls once per ",effSec,"s with single-symbol quotes (~200/day incl. news) and will recover automatically when the quota resets.");
       else
          Print("FMP feed unavailable: ",g_fmpLastErr," | check Tools>Options>Expert Advisors>Allow WebRequest for https://financialmodelingprep.com");
    }
@@ -2278,10 +2270,18 @@ void RefreshFMPMacro(bool force=false)
    else
    {
       g_fmpErrCount++;
-      if(StringFind(g_fmpLastErr,"429")>=0||StringFind(g_fmpLastErr,"err 0")>=0)g_fmp429Count++;
-      // Keep the last-good basket values (stale) for 10 minutes so one failed poll
+      // Classify BEFORE backoff: 402 = plan-restricted (live probe 2026-09-09),
+      // never retry-soon; "err 0" alone still means rate-limit/transport stall.
+      bool planRestricted=(StringFind(g_fmpLastErr,"http 402")>=0);
+      if(planRestricted)
+      {
+         if(g_fmpErrCount==1)Print("FMP feed plan-restricted (HTTP 402): this API key's plan does not cover the requested data. Check the FMP subscription for key ",StringSubstr(FMPKey(),0,4),"**** - macro layer stays on broker EURUSD fallback.");
+      }
+      else if(StringFind(g_fmpLastErr,"429")>=0||StringFind(g_fmpLastErr,"err 0")>=0)g_fmp429Count++;
+      // Keep the last-good basket values (stale) for 70 minutes so one failed poll
       // doesn't flip the macro gate; after that, fall back to broker EURUSD momentum.
-      bool stale=(g_fmpLastOK>0 && now-g_fmpLastOK<600);
+      // 70 > 60-min healthy cycle: a single missed poll must not kill the feed.
+      bool stale=(g_fmpLastOK>0 && now-g_fmpLastOK<4200);
       g_usdAvailable=stale;
       if(!stale)g_usdBias=0;
       if(InpAllowBrokerMacroFallback&&InpUseEURUSD&&!stale)
@@ -2296,7 +2296,7 @@ void RefreshFMPMacro(bool force=false)
 
    if(InpFMPIncludeSPX&&batchOK)
    {
-      // SPX rides the SAME batch request (appended symbol) - zero extra requests.
+      // SPX rides the same single-quote loop (one extra request, see FMPQuoteBatch).
       g_spxAvailable=g_usdGotSPX;
       if(g_spxAvailable)
       {

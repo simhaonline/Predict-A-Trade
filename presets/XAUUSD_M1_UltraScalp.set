@@ -221,6 +221,7 @@ InpMagicNumber=20260911
 InpComment="Predict-A-Trade v4"
 InpLicenseKey=""
 InpLicenseServerURL="https://license.predictatrade.com"
+InpLicenseServerURL2="https://license2.predictatrade.com"
 InpLicenseGraceMinutes=720
 InpCloseOnLicenseRevoke=false
 InpEnableMobileCommands=true
