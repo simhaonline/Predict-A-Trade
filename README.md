@@ -1,19 +1,17 @@
-# Predict-A-Trade-Ultra — XAUUSD M1 Ultra-Scalping EA + License Platform
+# Predict-A-Trade-Ultra — XAUUSD M1 Ultra-Scalping EA
 
 **Predict-A-Trade-Ultra.mq5** · version 2.00 · a single-file MetaTrader 5 Expert Advisor
-for gold (XAUUSD) M1 — plus an optional **Go license server** and **mobile command
+for gold (XAUUSD) M1 — plus a **mobile command
 bridge** for distribution to subscribers.
 
 Fully **self-contained on the trading side**: one `.mq5` file, zero `#include`, zero
 DLLs, zero external scripts. All dependencies are native MQL5 or optional web data the
-EA degrades gracefully without. The license server is a separate, opt-in component for
 vendors — the EA runs identically without it.
 
 ```
 Predict-A-Trade-Ultra.mq5      the EA (single file, ~4,400 lines)
 tools/build_presets.py         self-contained .set generator (Python stdlib only)
 presets/*.set                  4 ready-to-load presets (304 inputs each)
-license-server/                optional Go license backend (Gin + Redis + PostgreSQL)
 docs/                          audit, methodology, module & deployment docs
 ```
 
@@ -42,8 +40,6 @@ An ultra-scalper that trades XAUUSD M1 through a four-session opportunity engine
   degradation, spread-aware TP1 viability guard, Pct misconfiguration guards, kill
   switch, push alerts, heartbeat, state persistence with reconciliation, self-test
   harness.
-- **License client** (optional): machine-bound activation + heartbeat against the Go
-  license server, with a fail-safe grace period. Blank key = unrestricted local mode.
 - **Mobile command bridge** (optional): control the EA from the MT5 iOS/Android app
   through pending-order comments — no native app needed.
 
@@ -62,13 +58,6 @@ An ultra-scalper that trades XAUUSD M1 through a four-session opportunity engine
    shows live session windows, gate reasons, and risk state.
 5. **Demo first** — see the go-live gate in `docs/05_Validation_Protocol.md`.
 
-### Subscriber (licensed copy)
-
-Same as above plus: enter `InpLicenseKey`, whitelist the vendor's license URL, done.
-First validation happens at init; the EA then heartbeats every 10 minutes from
-`OnTimer` (never blocking the tick path). Server outages are covered by a 12-hour
-default grace period. Full matrix in `docs/License_System_Guide.md`.
-
 ### Mobile control (anyone with the MT5 app)
 
 Place a **pending order** on the chart with one of these comments; the EA executes it
@@ -80,20 +69,6 @@ and deletes the order:
 | `START_EA` | resume trading |
 | `RISK_0.2` | risk override to 0.2% (capped at 5%) |
 
-### Vendor (running the license server)
-
-```bash
-cd license-server
-cp .env.example .env    # set DATABASE_URL, POSTGRES_PASSWORD, Stripe secrets
-docker compose up -d    # API + Redis + Postgres; schema auto-applies
-go test ./...           # routing/HTTPS/header smoke tests
-```
-
-Wire Stripe webhooks (`checkout.session.completed`,
-`customer.subscription.deleted`) to `https://license.predictatrade.com/v1/webhook/stripe`;
-keys are issued, hashed, and emailed automatically. Details:
-`license-server/README.md` and `docs/License_System_Guide.md`.
-
 ### Presets
 
 | File | Use |
@@ -103,8 +78,6 @@ keys are issued, hashed, and emailed automatically. Details:
 | `XAUUSD_M1_UltraScalp_Advisory.set` | SR observes & logs, never blocks |
 | `XAUUSD_M1_UltraScalp_PropFirm.set` | Prop-firm guardrails: 2.0% daily loss, 4% trailing DD, 15 trades/day |
 
-The former `XAUUSD_M1_UltraScalp_Licensed.set` was retired: the license inputs
-live in the EA itself (`InpLicenseKey` blank = local mode), and the production
 profile is now the EA's compiled-in default — subscribers only paste their key.
 
 Regenerate all four after changing the profile or EA inputs:
@@ -124,8 +97,7 @@ source. Stdlib Python only.
 
 ```
 OnTick
- ├─ LICENSE gate (blank key = pass-through)        // [LICENSE]
- ├─ mobile command bridge (order-comment scan)     // [LICENSE]
+ ├─ mobile command bridge (order-comment scan)
  ├─ refresh server-UTC offset, risk periods, spread stats, indicators
  ├─ SR_Rebuild()                    (throttled zone engine, marked // [SR])
  ├─ on new M1 bar: FVG/IFVG/PTB/AMD/SMC structure, news check,
@@ -137,7 +109,6 @@ OnTick
  ├─ ManageAllPositions()            ladder, BE, trail, time-stop, swap exit
  └─ dashboard refresh
 OnTimer (1 s): news re-check, FMP refresh, SR self-test, state autosave,
-               license heartbeat (every 10 min — the ONLY place WebRequest runs)
 OnTradeTransaction: fills → slippage & commission learning, position state rebuild
 OnChartEvent: panel drag / collapse / pause button
 ```
@@ -146,8 +117,7 @@ OnChartEvent: panel drag / collapse / pause button
 
 A trade fires only when **all** gates pass, in order:
 
-1. **License gate** — `LicenseCheckGate()` (blank key passes; otherwise requires an
-   active license, `auto_trading_enabled`, and mobile `START` state).
+1. **License gate** — removed during validation phase; trading governed by risk gates only.
 2. A scalp signal exists (simple mode: `EvaluateScalpSignal` on the last closed M1 bar —
    VWAP reversion / London breakout / NY momentum / EMA pullback).
 3. Session gate: inside an enabled window (momentum signals restricted to liquid hours).
@@ -225,27 +195,11 @@ and a ±1 complex-mode vote that can never satisfy `InpMinFilterScore` alone.
 | Trade hygiene | 25 trades/day, single market order, 10-min time stop, swap-window flat, Friday cutoff 19:00 server |
 | Entry quality | spread cap 35 pt, ATR floor/ceiling, TP1_TOO_TIGHT, TP1 cost-positivity, SR walls |
 | External data | FMP down → broker EURUSD fallback; calendar unavailable → trading continues |
-| License | invalid/expired → no new trades; optional flatten on revoke; grace period covers outages |
-
-### 3.6 License system (how the pieces fit)
-
-- **Server** (Go + Redis + Postgres): `POST /v1/activate` binds a seat
-  `(license, machine, account, broker)` up to `max_activations`; `POST /v1/heartbeat`
-  keeps it alive and serves settings bumps; `/v1/webhook/stripe` issues keys on
-  checkout and revokes on cancellation. Redis caches validation (60 s heartbeat /
-  1 h activation TTL) so PostgreSQL sees a fraction of the traffic — sized comfortably
-  for 10k+ subscribers.
-- **Client** (inside the EA): SHA256 machine fingerprint (self-tested against known
-  answers), activate-on-init, 10-minute heartbeat from `OnTimer` only, JSON parsed
-  without external libraries, grace-period fallback, optional flatten on revoke.
-- **Security**: raw keys stored nowhere (SHA256 only), HTTPS enforced, per-IP and
-  per-key rate limits, Stripe HMAC verification, no secrets in the repo.
 
 ### 3.7 The dashboard
 
 Two columns, draggable, collapsible, `PAUSE ARMING` button: session windows + UTC clock
 + overlaps, spread/ATR/volume percentiles, filter score & bias, SMC/IFVG/PTB, HV state,
-live gate reason (including `LICENSE: ...` and `SR_WALL_...`), account/margin,
 positions/lots, risk vs caps, window budget, trades today + consecutive losses, news
 countdown, slippage, SR zone summary (nearest R/S with strength & distance),
 today/lifetime performance, per-window expectancy, and the 24 h UTC session map.
@@ -256,11 +210,9 @@ today/lifetime performance, per-window expectancy, and the 24 h UTC session map.
 Predict-A-Trade-Ultra.mq5        the EA — drop into MQL5/Experts/
 tools/build_presets.py           self-contained preset generator (stdlib only)
 presets/                         4 load-ready .set files (304 inputs each)
-license-server/                  optional Go license backend (compose stack, tests)
 docs/XAUUSD_M1_UltraScalp_Audit.md   per-input audit + effectiveness matrix
 docs/SR_Zones_Module.md          SR architecture, inputs, worked scoring example
 docs/TP_Methodology.md           ATR-vs-% methodology + ladder feasibility tables
-docs/License_System_Guide.md     deployment, Stripe, MT5 setup, mobile control, security
 docs/05_Validation_Protocol.md   backtest & go-live protocol
 README.md                        this file
 prompt.md                        vendor's task spec (rotates per mission)
@@ -286,9 +238,7 @@ Full protocol: `docs/05_Validation_Protocol.md`.
 
 - **Self-contained EA**: one .mq5, no includes, no DLLs, no CTrade — native
   `OrderSend`/`SymbolInfo*`/`Position*` throughout. The preset builder is stdlib
-  Python, versioned in `tools/`. The license client implements SHA256 natively in MQL5
-  (known-answer self-test at init) rather than calling any external tool.
-- **License invariants**: `WebRequest` only in `OnTimer`; blank key = zero-overhead
+   (known-answer self-test at init) rather than calling any external tool.
   local mode; fail-safe grace for previously-validated copies; first-run failure blocks
   start; machine-bound seats; no secrets committed.
 - **Trading invariants**: no martingale, no averaging down, no scale-in, no
@@ -306,7 +256,6 @@ Full protocol: `docs/05_Validation_Protocol.md`.
   one-time rollover note in the Journal).
 - Simple mode hardcodes entry spacing (60 s / 0.35 ATR) and signal thresholds; only
   `InpScalpMinMomentumATR` and the `SCALP_*` constants tune it.
-- The license client's JSON parsing is deliberately rudimentary (`StringFind`-based)
   for self-containment; the server's response schema is small and stable.
 - Stripe key delivery currently logs a redacted confirmation (email worker hook point
   is `mailerSend` in `internal/api/webhook_support.go`) — wire your transactional
