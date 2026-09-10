@@ -1429,6 +1429,7 @@ double g_tp1PctEff=0.75,g_tp2PctEff=0.20,g_tp3PctEff=0.05;
 double InpTPPctSanitize(double v){ return (v>1.0?v/100.0:v); }
 datetime g_lastOffsetRefresh=0,g_lastBar=0,g_lastExitTime=0,g_lastEntryTime=0;
 int g_barsSeen=0;   // [FIX 2026-09-09] M1 bars seen since EA start (warm-up gate)
+bool g_lastIndicatorsReady=false;   // [FIX 2026-09-09 P0] edge-detect for the once-per-bar support work
 // Simple-mode armed plan snapshot: TryArm() computes the scalp ladder (t1/t2/t3) before
 // the market order fills; OnTradeTransaction later reconstructs position state from the
 // deal. These carry the ARMED plan into AddPositionState so the broker TP and the managed
@@ -1558,16 +1559,17 @@ double NormalizeVolume(double lots)
 double PriceNorm(double p){ return NormalizeDouble(MathRound(p/broker.tickSize)*broker.tickSize,broker.digits); }
 double MinTradeDistance()
 {
-   // [FIX 2026-09-09] Guarantee every stop clears the live spread AND the broker
+   // [FIX 2026-09-09] Guarantee every stop clears the LIVE spread AND the broker
    // stop/freeze level by at least a small safety buffer. On XAUUSD the raw
    // stopsLevel/freezeLevel floor (often ~0) plus 2 points can sit INSIDE a 30-point
    // spread, so entries were stopped out within 1 minute (today's min SL was 0.33 pts,
-   // avg 1.87 pts, spread 3.0 pts). Floor = spread + brokerLevel + buffer so a normal
-   // tick cannot instant-stop the trade. g_spreadAvg is the rolling average spread in
-   // points (global, line 1407); used as the floor so the stop always clears the live
-   // spread. Clamped to 100pts so a freak spike can't blow the stop to absurd width.
-   // Fall back to stopsLevel*3 if the tracker hasn't warmed up yet.
-   double spPts=(g_spreadAvg>0?MathMin(g_spreadAvg,100.0):3.0*broker.stopsLevel);
+   // avg 1.87 pts, spread 3.0 pts). [FIX 2026-09-09 P0] Floor on the LIVE spread
+   // (SpreadPoints()) — the rolling AVERAGE lags the spike you are trying to survive
+   // (a 130-pt live spread with a 0.6-ATR target left the SL inside the spread when the
+   // floor was the average). Still clamped to 100 pts so a freak spike cannot blow the
+   // stop to absurd width. Fall back to stopsLevel*3 if data is unavailable.
+   double liveSp=SpreadPoints();
+   double spPts=(liveSp>0?MathMin(liveSp,100.0):(g_spreadAvg>0?MathMin(g_spreadAvg,100.0):3.0*MathMax(1,broker.stopsLevel)));
    double spreadFloor=spPts*broker.point;
    double base=MathMax(broker.stopsLevel,broker.freezeLevel)*broker.point+spreadFloor+2*broker.point;
    // Phase 4.1: optionally add the safety buffer on top of broker stops/freeze level
@@ -4187,7 +4189,7 @@ bool PreflightNewTrade(MqlTradeRequest &request,MqlTradeCheckResult &check,strin
    // (which is essentially always by send time). Allow a small RELATIVE headroom for
    // tick movement instead of an impossible absolute epsilon.
    else if(risk<=0||risk>g_lastAllowedRiskMoney*(1.0+0.02)+1e-4)reason="PREFLIGHT_TRADE_RISK_CAP";
-   else if(!RiskRoom(risk,dir,w,reason)){}
+   else if(!RiskRoom(risk,dir,w,request.price,request.sl,reason)){}
    if(reason!="")
    {g_gateReason=reason;GateHist(reason);Print("PREFLIGHT ",reason);return false;}
    MqlTradeCheckResult chk;ZeroMemory(chk);
@@ -4281,7 +4283,7 @@ double CalculateLot(double slDist,ENUM_WINDOW_ID w,bool hv,int dir=0,double entr
    return CalculateLotNative(slDist,dir,entry,sl,w,hv);
 }
 
-bool RiskRoom(double newRisk,int dir,ENUM_WINDOW_ID w,string &why)
+bool RiskRoom(double newRisk,int dir,ENUM_WINDOW_ID w,double entry,double sl,string &why)
 {
    double eq=AccountInfoDouble(ACCOUNT_EQUITY);if(eq<=0){why="bad equity";GateHist("bad equity");return false;}
    // [FIX] Keep RiskRoom consistent with CalculateLotNative's min-lot floor. On MICRO the
@@ -4290,13 +4292,25 @@ bool RiskRoom(double newRisk,int dir,ENUM_WINDOW_ID w,string &why)
    // small-account scalp AFTER the solver had already approved it (ENTRY_GATE "aggregate
    // risk cap" with risk=SIZE_OK). The documented small-account policy
    // (GetProfileMinLotRiskCeilingPct) guarantees the one allowed min-lot scalp, and CanEnter
-   // already enforces the position ceiling, so once we are still within the allowed position
-   // count the budget gates must not veto the solver-approved scalp.
-   if(InpAutoRiskSizing && InpAllowMinLotFallback && GetProfileMaxPositions()>0)
+   // already enforces the position ceiling.
+   // [FIX 2026-09-09 P0] The old hard `return true` bypassed ALL THREE caps whenever own
+   // positions were under the cap — including the manual-lot path (0.05 lots could stack
+   // with zero budget check). Replaced with the solver's EXACT policy shape, narrowed:
+   // the guarantee applies ONLY when the request IS min-lot-sized (risk <= min-lot risk at
+   // the actual stop) AND total open risk stays within the explicit min-lot ceiling
+   // (MICRO 5% / STD 3% / PRO 2% — the same ceiling the solver vets minRisk against).
+   // Any larger request (manual lots, bigger stops) is judged by the normal caps, never bypassed.
+   if(InpAutoRiskSizing&&InpAllowMinLotFallback&&GetProfileMaxPositions()>0&&entry>0&&sl>0)
    {
       int own=0;
       for(int i=0;i<PositionsTotal();i++){ulong t=PositionGetTicket(i);if(t>0&&PositionSelectByTicket(t)&&PositionGetString(POSITION_SYMBOL)==eaSymbol&&PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)own++;}
-      if(own<GetProfileMaxPositions())return true;
+      if(own<GetProfileMaxPositions())
+      {
+         double minRisk=CalculateRealTradeRiskMoney(dir,broker.volumeMin,entry,sl);
+         double ceiling=GetConservativeCapitalBase()*GetProfileMinLotRiskCeilingPct()/100.0;
+         if(minRisk>0&&newRisk<=minRisk*1.02+1e-6&&(OpenRiskMoney()+newRisk)<=ceiling+1e-6)
+            return true;   // the ONE guaranteed min-lot scalp; larger risk never reaches here
+      }
    }
    // [CAPITAL ENGINE] profile limits in Auto mode; identical legacy inputs when false.
    if((OpenRiskMoney()+newRisk)/eq*100.0>GetProfileAggregateRiskPct()){why="aggregate risk cap";GateHist("aggregate risk cap");return false;}
@@ -4898,13 +4912,28 @@ void AddPositionState(ulong ticket,long posId,int dir,ENUM_WINDOW_ID w,string se
    {
       double placed=PositionGetDouble(POSITION_TP);
       s.tp1=(placed>0?placed:(g_armValid?g_armTp1:0));
-      // Build the full ladder (TP2/TP3 virtual targets) and allocate the 75/20/5 split.
+      // [FIX 2026-09-09 P0] ONE source of truth: the ladder that was cost/R:R-validated at
+      // arm time (g_armTp1/2/3) IS the executed plan. BuildThreeTargets() re-derives the
+      // ladder from different geometry (InpTP1 cap 0.60 ATR vs the armed MIN_TP1_R 1.30xSL,
+      // TP2 0.75 ATR), so the position was approved on one R:R model and managed on another
+      // — and the monotonic clamp put TP2 *below* TP1, selling the second partial cheaper
+      // than the first. Never recalculate a validated plan after fill.
       if(InpUseThreeTargets&&InpAB_EnableThreeTP)
       {
-         BuildThreeTargets(dir,entry,sl,lots,w,hv,s.tp1,s.tp2,s.tp3);
-         AllocateVolumes(lots,s.volTP1,s.volTP2,s.volTP3);
-         // Guard: if ladder math collapsed (e.g. sub-min-lot residue), fall back to whole-at-TP1.
-         if(s.volTP1<=0&&s.volTP2<=0&&s.volTP3<=0){s.volTP1=lots;s.tp2=s.tp1;s.tp3=s.tp1;}
+         if(g_armValid&&g_armTp1>0&&g_armTp2>entry*0.000001&&g_armTp3>0)
+         {
+            // armed plan travels to the position unchanged; volumes re-split only
+            s.tp1=g_armTp1;s.tp2=g_armTp2;s.tp3=g_armTp3;
+            AllocateVolumes(lots,s.volTP1,s.volTP2,s.volTP3);
+            if(s.volTP1<=0&&s.volTP2<=0&&s.volTP3<=0){s.volTP1=lots;s.tp2=s.tp1;s.tp3=s.tp1;}
+         }
+         else
+         {
+            // No armed plan (restart mid-fill, manual entry): derive once here, monotonically.
+            BuildThreeTargets(dir,entry,sl,lots,w,hv,s.tp1,s.tp2,s.tp3);
+            AllocateVolumes(lots,s.volTP1,s.volTP2,s.volTP3);
+            if(s.volTP1<=0&&s.volTP2<=0&&s.volTP3<=0){s.volTP1=lots;s.tp2=s.tp1;s.tp3=s.tp1;}
+         }
       }
       else
       {
@@ -4982,7 +5011,7 @@ void TryArm()
          if(rl>0){sl=srSl;slDist=sd2;lots=rl;g_srSlShifted=true;}
       }
    }
-   double risk=CalculateRealTradeRiskMoney(dir,lots,pending,sl);if(!RiskRoom(risk,dir,w,why)){g_gateReason=why;GateHist(why);return;}
+   double risk=CalculateRealTradeRiskMoney(dir,lots,pending,sl);if(!RiskRoom(risk,dir,w,pending,sl,why)){g_gateReason=why;GateHist(why);return;}
    double t1,t2,t3;
    if(InpSimpleScalpMode)
    {
@@ -5001,6 +5030,14 @@ void TryArm()
       // (0.40 total / 0.75 total / 1.15 total ATR - authoritative profile)
       double atr2=g_atr;   // [B8]
       t2=PriceNorm(entry0+dir*SCALP_TP2_TOT*atr2);t3=PriceNorm(entry0+dir*SCALP_TP3_TOT*atr2);
+      // [FIX 2026-09-09 P0] ladder ordering: TP1 is forced to >=1.30R above, but TP2/TP3
+      // come from the SCALP_TOT constants (0.75/1.15 ATR) which can sit BELOW TP1 — a
+      // non-monotonic ladder sells the second partial cheaper than the first. Enforce
+      // Entry < TP1 < TP2 < TP3 (inverse for SELL) after the MIN_TP1_R bump.
+      double mdArm=MinTradeDistance();
+      if(dir>0){t2=MathMax(t2,t1+mdArm);t3=MathMax(t3,t2+mdArm);}
+      else{t2=MathMin(t2,t1-mdArm);t3=MathMin(t3,t2-mdArm);}
+      t2=PriceNorm(t2);t3=PriceNorm(t3);
       // [SR] snap each scalp leg to a nearby zone edge (within the shift cap)
       g_srTpSnapped=false;g_srSlShifted=false;   // per-arm telemetry reset
       if(InpSRSnapTP)
@@ -5010,7 +5047,15 @@ void TryArm()
          {
             double netS=0;   // constraint 7: keep the snap only if the leg still passes its cost gate
             double initR=PriceMoveMoney(MathAbs(entry0-sl),lots);   // [FIX] SL-loss-only base
-            if(NetProfitValid(dir,entry0,a1,lots,MinNetProfitForLeg(1,initR),netS)){t1=a1;t2=a2;t3=a3;g_srTpSnapped=true;}
+            if(NetProfitValid(dir,entry0,a1,lots,MinNetProfitForLeg(1,initR),netS))
+            {
+               t1=a1;t2=a2;t3=a3;g_srTpSnapped=true;
+               // [FIX 2026-09-09 P0] re-enforce ladder ordering AFTER the snap: SR_AdjustTP
+               // moves each leg independently, which can re-scramble TP1/TP2/TP3.
+               if(dir>0){t2=MathMax(t2,t1+mdArm);t3=MathMax(t3,t2+mdArm);}
+               else{t2=MathMin(t2,t1-mdArm);t3=MathMin(t3,t2-mdArm);}
+               t2=PriceNorm(t2);t3=PriceNorm(t3);
+            }
          }
       }
    }
@@ -5220,7 +5265,7 @@ void TryRecovery()
    while(!NetProfitValid(dir,entry,t1,lots,recMin1,net)&&gguard++<10) t1=PriceNorm(t1+dir*0.10*atr);
    if(!RRValid(dir,entry,sl,t1,InpRecoveryMinRR)){g_gateReason="recovery: R:R low";GateHist("recovery: R:R low");return;}
    if(!NetProfitValid(dir,entry,t1,lots,recMin1,net)){g_gateReason="recovery: cost";GateHist("recovery: cost");return;}
-   if(!RiskRoom(PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots),dir,recoveryWindow,why)){g_gateReason="recovery: risk cap";GateHist("recovery: risk cap");return;}
+   if(!RiskRoom(PriceMoveMoney(slDist,lots)+ExpectedAllInCost(lots),dir,recoveryWindow,entry,sl,why)){g_gateReason="recovery: risk cap";GateHist("recovery: risk cap");return;}
    string cmt="PAT|W"+IntegerToString((int)recoveryWindow)+"|RCV|"+(dir>0?"B":"S");
    double fill=0;ulong tk=0;
    // Broker TP is set to the VALIDATED TP1 (>=InpRecoveryMinRR). The recovery is a
@@ -5589,6 +5634,58 @@ int RecountConsecutiveLosses()
    return cons;
 }
 
+// [FIX 2026-09-09 P0] Rebuild the realized-loss breaker state from TODAY's deal history.
+// The state file can be stale (saved yesterday, or mid-write on a crash), and the binary
+// read silently zeroes everything on a format change — the daily realized halt and every
+// per-window halt must therefore be recomputed from the authoritative source (deals),
+// the same way RecountConsecutiveLosses() rebuilds the streak. One entry per POSITION
+// (all OUT deals aggregated by DEAL_POSITION_ID), attributed to the window carried by
+// the entry order comment ("PAT|W<id>|..."), falls back to the deal's window if parsing fails.
+void RebuildRealizedBreakersFromHistory()
+{
+   g_dayRealizedNet=0;
+   for(int w=0;w<WIN_COUNT;w++){g_windowDayRealized[w]=0;g_windowHaltedToday[w]=false;}
+   datetime now=TimeCurrent(),dayStart=now-(now%86400);
+   if(!HistorySelect(dayStart,now+60))return;
+   int total=HistoryDealsTotal();if(total<=0)return;
+   long ids[];double nets[];int wins[];int windows[];
+   ArrayResize(ids,total);ArrayResize(nets,total);ArrayResize(wins,total);ArrayResize(windows,total);
+   int n=0;
+   for(int i=0;i<total;i++)
+   {
+      ulong tk=HistoryDealGetTicket(i);if(tk==0)continue;
+      if(HistoryDealGetInteger(tk,DEAL_MAGIC)!=InpMagicNumber)continue;
+      if(HistoryDealGetString(tk,DEAL_SYMBOL)!=eaSymbol)continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk,DEAL_ENTRY)!=DEAL_ENTRY_OUT)continue;
+      long id=HistoryDealGetInteger(tk,DEAL_POSITION_ID);
+      double p=HistoryDealGetDouble(tk,DEAL_PROFIT)+HistoryDealGetDouble(tk,DEAL_SWAP)+HistoryDealGetDouble(tk,DEAL_COMMISSION);
+      int w=WIN_NONE;
+      string od=HistoryDealGetString(tk,DEAL_COMMENT);
+      int p1=StringFind(od,"PAT|W");
+      if(p1>=0)
+      {
+         string num=StringSubstr(od,p1+5);
+         int endD=0;while(endD<StringLen(num)&&StringGetCharacter(num,endD)>='0'&&StringGetCharacter(num,endD)<='9')endD++;
+         w=(int)StringToInteger(StringSubstr(num,0,endD));
+      }
+      if(w<=WIN_NONE||w>=WIN_COUNT)w=WIN_NONE;
+      int k=-1;for(int j=0;j<n;j++)if(ids[j]==id){k=j;break;}
+      if(k<0){ids[n]=id;nets[n]=p;wins[n]=(p>0?1:0);windows[n]=w;n++;}
+      else{nets[k]+=p;if(p>0)wins[k]=1;}
+   }
+   for(int j=0;j<n;j++)
+   {
+      g_dayRealizedNet+=nets[j];
+      int w=windows[j];
+      if(w>WIN_NONE&&w<WIN_COUNT)
+      {
+         g_windowDayRealized[w]+=nets[j];
+         double wLoss=(g_dayAnchor>0?-g_windowDayRealized[w]/g_dayAnchor*100.0:0);
+         if(wLoss>=InpWindowDailyLossPercent)g_windowHaltedToday[w]=true;
+      }
+   }
+}
+
 void SaveState()
 {
    if(!InpPersistState||!g_initialized)return;
@@ -5599,6 +5696,10 @@ void SaveState()
    FileWriteInteger(f,STATE_TAG,INT_VALUE);
    FileWriteInteger(f,g_stopDay,INT_VALUE);FileWriteInteger(f,g_stopWeek,INT_VALUE);FileWriteInteger(f,g_stopMonth,INT_VALUE);
    FileWriteInteger(f,g_dayKey,INT_VALUE);FileWriteInteger(f,g_weekKey,INT_VALUE);FileWriteInteger(f,g_monthKey,INT_VALUE);FileWriteDouble(f,g_dayAnchor);FileWriteDouble(f,g_weekAnchor);FileWriteDouble(f,g_monthAnchor);FileWriteInteger(f,g_tradesToday,INT_VALUE);FileWriteInteger(f,g_consecutiveLosses,INT_VALUE);FileWriteDouble(f,g_commissionRTPerLot);FileWriteInteger(f,g_perfTrades,INT_VALUE);FileWriteInteger(f,g_perfWins,INT_VALUE);FileWriteInteger(f,g_perfLosses,INT_VALUE);FileWriteDouble(f,g_perfNetProfit);FileWriteDouble(f,g_perfGrossProfit);FileWriteDouble(f,g_perfGrossLoss);FileWriteInteger(f,g_perfRetN,INT_VALUE);FileWriteDouble(f,g_perfRetMean);FileWriteDouble(f,g_perfRetM2);FileWriteDouble(f,g_perfCumNet);FileWriteDouble(f,g_perfPeakNet);FileWriteDouble(f,g_perfMaxDDMoney);
+   // [FIX 2026-09-09 P0] persist the realized-loss breaker state: a VPS/terminal restart
+   // mid-day must NOT silently clear the daily realized halt or any per-window halt.
+   FileWriteDouble(f,g_dayRealizedNet);
+   for(int w=0;w<WIN_COUNT;w++){FileWriteDouble(f,g_windowDayRealized[w]);FileWriteInteger(f,g_windowHaltedToday[w]?1:0,INT_VALUE);}
    for(int w=0;w<WIN_COUNT;w++){FileWriteInteger(f,g_ws[w].trades,INT_VALUE);FileWriteInteger(f,g_ws[w].wins,INT_VALUE);FileWriteInteger(f,g_ws[w].losses,INT_VALUE);FileWriteDouble(f,g_ws[w].grossPL);FileWriteDouble(f,g_ws[w].netPL);FileWriteDouble(f,g_ws[w].costs);FileWriteInteger(f,g_ws[w].tp1Hits,INT_VALUE);FileWriteInteger(f,g_ws[w].tp2Hits,INT_VALUE);FileWriteInteger(f,g_ws[w].tp3Hits,INT_VALUE);}
    // [PERFORMANCE GATING] rolling recent-R history (additive tail; old readers stop at the PS count safely)
    for(int w=0;w<WIN_COUNT;w++){FileWriteInteger(f,g_ws[w].recentRCount,INT_VALUE);for(int i=0;i<64;i++)FileWriteDouble(f,g_ws[w].recentR[i]);FileWriteInteger(f,g_ws[w].recentRIdx,INT_VALUE);}
@@ -5637,6 +5738,13 @@ void LoadState()
    if(tag!=STATE_TAG){FileClose(f);Print("State file format differs (tag=",tag,") - starting from a clean slate.");return;}
    g_stopDay=(FileReadInteger(f,INT_VALUE)!=0);g_stopWeek=(FileReadInteger(f,INT_VALUE)!=0);g_stopMonth=(FileReadInteger(f,INT_VALUE)!=0);
    g_dayKey=(int)FileReadInteger(f,INT_VALUE);g_weekKey=(int)FileReadInteger(f,INT_VALUE);g_monthKey=(int)FileReadInteger(f,INT_VALUE);g_dayAnchor=FileReadDouble(f);g_weekAnchor=FileReadDouble(f);g_monthAnchor=FileReadDouble(f);g_tradesToday=(int)FileReadInteger(f,INT_VALUE);g_consecutiveLosses=(int)FileReadInteger(f,INT_VALUE);g_commissionRTPerLot=FileReadDouble(f);if(!FileIsEnding(f)){g_perfTrades=(int)FileReadInteger(f,INT_VALUE);g_perfWins=(int)FileReadInteger(f,INT_VALUE);g_perfLosses=(int)FileReadInteger(f,INT_VALUE);g_perfNetProfit=FileReadDouble(f);g_perfGrossProfit=FileReadDouble(f);g_perfGrossLoss=FileReadDouble(f);g_perfRetN=(int)FileReadInteger(f,INT_VALUE);g_perfRetMean=FileReadDouble(f);g_perfRetM2=FileReadDouble(f);g_perfCumNet=FileReadDouble(f);g_perfPeakNet=FileReadDouble(f);g_perfMaxDDMoney=FileReadDouble(f);}
+   // [FIX 2026-09-09 P0] realized-loss breaker state (only in new-format files; old files
+   // end here and the day-scoped history rebuild below reconstructs the values anyway)
+   if(!FileIsEnding(f))
+   {
+      g_dayRealizedNet=FileReadDouble(f);
+      for(int w=0;w<WIN_COUNT&&!FileIsEnding(f);w++){g_windowDayRealized[w]=FileReadDouble(f);g_windowHaltedToday[w]=(FileReadInteger(f,INT_VALUE)!=0);}
+   }
    for(int w=0;w<WIN_COUNT&&!FileIsEnding(f);w++){g_ws[w].trades=(int)FileReadInteger(f,INT_VALUE);g_ws[w].wins=(int)FileReadInteger(f,INT_VALUE);g_ws[w].losses=(int)FileReadInteger(f,INT_VALUE);g_ws[w].grossPL=FileReadDouble(f);g_ws[w].netPL=FileReadDouble(f);g_ws[w].costs=FileReadDouble(f);g_ws[w].tp1Hits=(int)FileReadInteger(f,INT_VALUE);g_ws[w].tp2Hits=(int)FileReadInteger(f,INT_VALUE);g_ws[w].tp3Hits=(int)FileReadInteger(f,INT_VALUE);}
    // [PERFORMANCE GATING] R-history tail (only present in new-format state files)
    if(!FileIsEnding(f))for(int w=0;w<WIN_COUNT&&!FileIsEnding(f);w++){g_ws[w].recentRCount=(int)FileReadInteger(f,INT_VALUE);for(int i=0;i<64&&!FileIsEnding(f);i++)g_ws[w].recentR[i]=FileReadDouble(f);if(!FileIsEnding(f))g_ws[w].recentRIdx=(int)FileReadInteger(f,INT_VALUE);}
@@ -6263,7 +6371,7 @@ int OnInit()
     else Print("DASHBOARD: saved panel position (",sx,",",sy,") outside this chart - resetting to default");}
    ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);g_atrKeep=MathMax(30,MathMin(ATR_SAMPLES,InpATRPercentileLookback));ArrayInitialize(g_spreadBuf,0);ArrayInitialize(g_slipBuf,0);ArrayInitialize(g_atrBuf,0);ArrayInitialize(g_usdMove,0);ArrayInitialize(g_usdGot,false);RefreshServerOffset(true);UIRecompute();
    if(InpRunInitSelfTests)PrintSessionMapAudit();   // [lean init] debug-only
-   UpdateRiskPeriods();if(InpPersistState)LoadState();UpdateRiskPeriods();
+   UpdateRiskPeriods();if(InpPersistState)LoadState();RebuildRealizedBreakersFromHistory();UpdateRiskPeriods();
    if(!MQLInfoInteger(MQL_TESTER)&&GlobalVariableCheck(ControlKey("UNCERTAIN")))g_executionUncertain=true;
    //--- [SIGNAL QUALITY] weight validation + classification warm start (sections 42/44/45)
    InitConfidenceWeights();
@@ -6344,11 +6452,12 @@ void ReconcileExecutionUncertain()
 void OnTick()
 {
    ReconcileExecutionUncertain();
-   ProcessMobileCommands();         // mobile command bridge (cheap: scans orders)
+   // [FIX 2026-09-09 P0] mobile command scan moved to OnTimer (1 s): it loops OrdersTotal()
+   // per call — per-tick on liquid gold that is hundreds of scans/minute for a command
+   // that arrives at most every few seconds. 1-second latency is plenty for STOP_EA/START_EA.
    RefreshServerOffset(false);UpdateRiskPeriods();UpdateSpreadStats();IsNewBar();UpdateIndicators();RefreshFMPMacro(false);SR_Rebuild();   // [SR] throttled; before signal evaluation
    datetime signalBar=iTime(eaSymbol,PERIOD_M1,1);
    bool newEvalBar=(g_indicatorsReady&&signalBar>0&&g_indicatorBar==signalBar&&g_signalBar!=signalBar);
-   if(newEvalBar){RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);g_signalBar=signalBar;}
    if(g_indicatorsReady)
    {
       //--- [FIX] evaluate the signal on EVERY TICK when indicators are ready: the old
@@ -6356,19 +6465,33 @@ void OnTick()
       //--- skipped entirely whenever its first tick raced the data load - and the stale
       //--- g_scalpSignal (usually 0) was what TryArm kept seeing. The setup conditions
       //--- read only CLOSED bars, so per-tick evaluation is stable and cheap.
-      UpdateStructureState();
-      UpdateVolumeEngine();
-      UpdateDirectionRegime();
-      UpdateEnvironmentRegime();
-      double closes[20];
-      if(CopyClose(eaSymbol,PERIOD_M1,1,20,closes)==20)
+      //--- [FIX 2026-09-09 P0] bar-constant support work (structure/volume/regimes) moved
+      //--- into the new-bar block: UpdateStructureState copies 90 bars + ~40 resizes,
+      //--- UpdateVolumeEngine + UpdateEnvironmentRegime copy more and scan 240-element
+      //--- percentile arrays — none of it changes intra-bar. Now: run once per M1 close
+      //--- (newEvalBar) or once after readiness flips true (first-run init), cutting
+      //--- per-tick CPU by ~60-80% on live gold. The signal itself stays per-tick.
+      bool firstReady=(g_indicatorsReady&&!g_lastIndicatorsReady);
+      g_lastIndicatorsReady=g_indicatorsReady;
+      if(newEvalBar||firstReady)
       {
-         double sum=0;for(int k=0;k<20;k++)sum+=closes[k];g_bbMid=sum/20.0;
-         double v=0;for(int k=0;k<20;k++){double d=closes[k]-g_bbMid;v+=d*d;}
-         g_bbUp=g_bbMid+2.0*MathSqrt(v/20.0);g_bbLo=g_bbMid-2.0*MathSqrt(v/20.0);
+         RefreshVolumeRatio();UpdateSuperTrend();UpdateVWAP();DetectFVG();DetectIFVG();DetectPTB();AnalyzeAMD();DetectSMC();EvaluateFilters();UpdateOpportunityObservations();CheckNews(false);g_signalBar=signalBar;
+         UpdateStructureState();
+         UpdateVolumeEngine();
+         UpdateDirectionRegime();
+         UpdateEnvironmentRegime();
+         //--- [FIX 2026-09-09 P0] VWAP is bar-constant too: copy the anchor window once per
+         //--- bar and accumulate Σpv/Σv/Σp² incrementally; recompute the BB mid from the
+         //--- same 20-close snapshot instead of re-copying 20 closes per tick.
+         double closes[20];
+         if(CopyClose(eaSymbol,PERIOD_M1,1,20,closes)==20)
+         {
+            double sum=0;for(int k=0;k<20;k++)sum+=closes[k];g_bbMid=sum/20.0;
+            double v=0;for(int k=0;k<20;k++){double d=closes[k]-g_bbMid;v+=d*d;}
+            g_bbUp=g_bbMid+2.0*MathSqrt(v/20.0);g_bbLo=g_bbMid-2.0*MathSqrt(v/20.0);
+         }
+         EvaluateScalpSignal();
       }
-      EvaluateScalpSignal();
-      g_signalBar=signalBar;
    }
    if((g_stopDay||g_stopWeek||g_stopMonth)&&InpBreakerAction==BREAKER_CLOSE_ALL)EmergencyCloseAll();
    EnforceSwapFlat();
@@ -6386,6 +6509,7 @@ void OnTick()
 
 void OnTimer()
 {
+   ProcessMobileCommands();   // [FIX 2026-09-09 P0] once per second instead of per tick
    RefreshServerOffset(false);CheckNews(false);RefreshFMPMacro(false);EnforceSwapFlat();if(InpCancelStalePendings)DeleteOwnPendings(true);DashUpdate(true);if(InpRunInitSelfTests)SR_SelfTest();if(InpPersistState && (ServerNow()%30)==0)SaveState();
    // [CAPITAL ENGINE] profile recompute on the 1s timer: cheap (equity + cached FX),
    // detects deposits/withdrawals/equity drift across tier boundaries within a minute.
